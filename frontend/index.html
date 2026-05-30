@@ -1,0 +1,964 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Polymarket Bot — Command Center</title>
+  <meta name="description" content="Polymarket trading bot command center with copy trading and AI market research" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css?v=9" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <div id="app">
+    <!-- Sidebar -->
+    <aside id="sidebar">
+      <div class="sidebar-logo">
+        <div class="logo-icon">⚡</div>
+        <span class="logo-text">PolyBot</span>
+      </div>
+
+      <nav class="sidebar-nav">
+        <a href="#dashboard" class="nav-item active" data-page="dashboard" id="nav-dashboard">
+          <span class="nav-icon">📊</span>
+          <span class="nav-label">Dashboard</span>
+        </a>
+        <a href="#copy" class="nav-item" data-page="copy" id="nav-copy">
+          <span class="nav-icon">👥</span>
+          <span class="nav-label">Copy Traders</span>
+        </a>
+        <a href="#opportunities" class="nav-item" data-page="opportunities" id="nav-opportunities">
+          <span class="nav-icon">🔍</span>
+          <span class="nav-label">Opportunities</span>
+        </a>
+        <a href="#approvals" class="nav-item" data-page="approvals" id="nav-approvals">
+          <span class="nav-icon">⭐</span>
+          <span class="nav-label">Best Picks</span>
+        </a>
+        <a href="#future" class="nav-item" data-page="future" id="nav-future">
+          <span class="nav-icon">🔮</span>
+          <span class="nav-label">Future Trades</span>
+        </a>
+        <a href="#consensus" class="nav-item" data-page="consensus" id="nav-consensus">
+          <span class="nav-icon">🤝</span>
+          <span class="nav-label">Consensus</span>
+        </a>
+        <a href="#rankings" class="nav-item" data-page="rankings" id="nav-rankings">
+          <span class="nav-icon">🏆</span>
+          <span class="nav-label">Rankings</span>
+        </a>
+        <a href="#trades" class="nav-item" data-page="trades" id="nav-trades">
+          <span class="nav-icon">📋</span>
+          <span class="nav-label">Trade History</span>
+        </a>
+        <a href="#profile" class="nav-item" data-page="profile" id="nav-profile">
+          <span class="nav-icon">👤</span>
+          <span class="nav-label">My Profile</span>
+        </a>
+        <a href="#assistant" class="nav-item" data-page="assistant" id="nav-assistant">
+          <span class="nav-icon">🤖</span>
+          <span class="nav-label">AI Assistant</span>
+        </a>
+        <a href="#journal" class="nav-item" data-page="journal" id="nav-journal">
+          <span class="nav-icon">📓</span>
+          <span class="nav-label">Journal</span>
+        </a>
+        <a href="#settings" class="nav-item" data-page="settings" id="nav-settings">
+          <span class="nav-icon">⚙️</span>
+          <span class="nav-label">Settings</span>
+        </a>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="connection-dot" id="ws-dot"></div>
+        <span class="connection-label" id="ws-label">Connecting...</span>
+      </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main id="main">
+      <!-- Top Bar -->
+      <header id="topbar">
+        <div class="topbar-left">
+          <h1 id="page-title">Dashboard</h1>
+          <span id="page-subtitle">Live trading overview</span>
+        </div>
+        <div class="topbar-right">
+          <div class="mode-badge" id="mode-badge">PAPER</div>
+          <div class="model-badge" id="model-badge">claude</div>
+          <button class="btn btn-danger" id="btn-stop" style="display:none" onclick="App.stopBot()">⏹ Stop Bot</button>
+          <button class="btn btn-success" id="btn-start" onclick="App.startBot()">▶ Start Bot</button>
+        </div>
+      </header>
+
+      <!-- Pages -->
+      <div id="page-dashboard" class="page active">
+        <!-- Stat Cards -->
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-label">Paper Balance</div>
+            <div class="stat-value" id="stat-balance">$—</div>
+            <div class="stat-sub">Available capital</div>
+          </div>
+          <div class="stat-card accent-green">
+            <div class="stat-label">Total P&amp;L</div>
+            <div class="stat-value" id="stat-pnl">$—</div>
+            <div class="stat-sub" id="stat-winrate">—% win rate</div>
+          </div>
+          <div class="stat-card accent-blue">
+            <div class="stat-label">Total Trades</div>
+            <div class="stat-value" id="stat-trades">—</div>
+            <div class="stat-sub" id="stat-positions">— open positions</div>
+          </div>
+          <div class="stat-card accent-purple">
+            <div class="stat-label">Copy Signals Today</div>
+            <div class="stat-value" id="stat-signals">—</div>
+            <div class="stat-sub" id="stat-lastscan">Last scan: —</div>
+          </div>
+        </div>
+
+        <!-- Chart + Live Feed -->
+        <div class="two-col">
+          <div class="card chart-card">
+            <div class="card-header">
+              <span class="card-title">P&amp;L Over Time</span>
+              <button class="btn btn-sm" onclick="App.runScan()">🔄 Scan Now</button>
+            </div>
+            <div class="chart-wrap">
+              <canvas id="pnl-chart"></canvas>
+            </div>
+          </div>
+          <div class="card feed-card">
+            <div class="card-header"><span class="card-title">Live Feed</span></div>
+            <div class="feed-list" id="live-feed">
+              <div class="feed-empty">Waiting for events...</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Pending Approvals + Recent Trades -->
+        <div class="two-col">
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">Pending Approvals</span>
+              <div style="display:flex;align-items:center;gap:8px">
+                <span class="badge badge-research" id="pending-count">0</span>
+                <button class="btn btn-sm btn-outline" onclick="App.loadDashboardPendingTrades()" style="padding:3px 10px;font-size:0.72rem">↺ Refresh</button>
+              </div>
+            </div>
+            <div class="pending-wrap" id="pending-trades-list">
+              <div class="feed-empty">Loading pending approvals...</div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-header"><span class="card-title">Recent Trades</span></div>
+            <div class="table-wrap">
+              <table class="data-table">
+                <thead>
+                  <tr><th>Market</th><th>Side</th><th>Size</th><th>Price</th><th>Source</th><th>Status</th><th>Time</th></tr>
+                </thead>
+                <tbody id="recent-trades-body">
+                  <tr><td colspan="7" class="empty-row">No trades yet</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Copy Traders Page -->
+      <div id="page-copy" class="page">
+        <div class="page-actions">
+          <button class="btn btn-primary" onclick="App.loadLeaderboard()">🔄 Load Leaderboard</button>
+          <button class="btn btn-outline" onclick="App.showAddTraderModal()">+ Add Wallet</button>
+        </div>
+        
+        <!-- Top Traders Leaderboard -->
+        <div class="card">
+          <div class="card-header"><span class="card-title">🏆 Top Traders Leaderboard</span> <span style="font-size:0.75rem;color:var(--text-muted)">Click Follow to track & copy</span></div>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr><th>Rank</th><th>Trader</th><th>ROI</th><th>Profit</th><th>Win Rate</th><th>Volume</th><th>Positions</th><th>Action</th></tr>
+              </thead>
+              <tbody id="leaderboard-body">
+                <tr><td colspan="8" class="empty-row">Click "Load Leaderboard" to see top traders</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        
+        <!-- My Tracked Traders -->
+        <div class="card" style="margin-top:1.5rem">
+          <div class="card-header"><span class="card-title">👥 My Tracked Traders</span> <span style="font-size:0.75rem;color:var(--text-muted)">Actively copying positions</span></div>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr><th>Trader</th><th>ROI</th><th>Profit</th><th>Win Rate</th><th>Volume</th><th>Status</th><th>Action</th></tr>
+              </thead>
+              <tbody id="traders-body">
+                <tr><td colspan="7" class="empty-row">No traders followed yet. Follow traders from the leaderboard above.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card" style="margin-top:1.5rem">
+          <div class="card-header"><span class="card-title">Recent Copy Signals</span></div>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr><th>Trader</th><th>Market</th><th>Side</th><th>Copied Size</th><th>Price</th><th>Status</th><th>Time</th></tr>
+              </thead>
+              <tbody id="signals-body">
+                <tr><td colspan="7" class="empty-row">No signals yet</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Pending Approvals Page -->
+      <div id="page-approvals" class="page">
+        <div class="page-actions">
+          <button class="btn btn-primary" onclick="App.loadPendingApprovals()">🔄 Refresh Best Picks</button>
+          <button class="btn btn-outline" onclick="App.runScan()">🔍 Run AI Scan</button>
+          <span style="font-size:0.75rem;color:var(--text-muted)">Sorted by: Quality Score + Event Date</span>
+        </div>
+        
+        <!-- Stats Summary -->
+        <div class="stats-grid" style="margin-bottom:1.5rem">
+          <div class="stat-card">
+            <div class="stat-label">🥇 GOLD Tier</div>
+            <div class="stat-value" id="approvals-gold">—</div>
+            <div class="stat-sub">Score 80+ (Exceptional)</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">🥈 SILVER Tier</div>
+            <div class="stat-value" id="approvals-silver">—</div>
+            <div class="stat-sub">Score 60-79 (Strong)</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">🥉 BRONZE Tier</div>
+            <div class="stat-value" id="approvals-bronze">—</div>
+            <div class="stat-sub">Score 40-59 (Good)</div>
+          </div>
+          <div class="stat-card accent-purple">
+            <div class="stat-label">⏰ Closing Soon</div>
+            <div class="stat-value" id="approvals-urgent">—</div>
+            <div class="stat-sub">Events in 7 days</div>
+          </div>
+        </div>
+        
+        <!-- New Picks List -->
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title">⭐ Best Picks — New Trades</span>
+            <span style="font-size:0.75rem;color:var(--text-muted)" id="approvals-count">Loading...</span>
+          </div>
+          <div id="approvals-list" class="approvals-container">
+            <div class="approvals-empty">
+              <p>Click "Refresh Best Picks" to load the highest-quality opportunities</p>
+              <p style="font-size:0.75rem;color:var(--text-muted);margin-top:0.5rem">These are filtered for edge >5%, medium+ confidence, and ranked by quality</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Reviewed Trades Table -->
+        <div class="card" style="margin-top:1.5rem">
+          <div class="card-header">
+            <span class="card-title">📋 Reviewed Trades</span>
+            <span style="font-size:0.75rem;color:var(--text-muted)" id="reviewed-count"></span>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Question</th>
+                  <th>Side</th>
+                  <th>Edge</th>
+                  <th>Tier</th>
+                  <th>AI Model</th>
+                  <th>Outcome</th>
+                  <th>Event Date</th>
+                </tr>
+              </thead>
+              <tbody id="reviewed-body">
+                <tr><td colspan="7" class="empty-row" style="color:var(--text-muted)">No reviewed trades yet — rate a pick as Win or Loss to see it here</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Future Trades Page -->
+      <div id="page-future" class="page">
+        <div class="page-actions">
+          <button class="btn btn-primary" onclick="App.loadFutureTrades()">🔄 Refresh Future Trades</button>
+          <button class="btn btn-outline" onclick="App.runScan()">🔍 Run AI Scan</button>
+          <span style="font-size:0.75rem;color:var(--text-muted)">Sorted by: Event Date (Soonest First) + Quality Score</span>
+        </div>
+
+        <!-- Stats Summary -->
+        <div class="stats-grid" style="margin-bottom:1.5rem">
+          <div class="stat-card">
+            <div class="stat-label">🥇 GOLD Tier</div>
+            <div class="stat-value" id="future-gold">—</div>
+            <div class="stat-sub">Score 80+ (Exceptional)</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">🥈 SILVER Tier</div>
+            <div class="stat-value" id="future-silver">—</div>
+            <div class="stat-sub">Score 60-79 (Strong)</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">🥉 BRONZE Tier</div>
+            <div class="stat-value" id="future-bronze">—</div>
+            <div class="stat-sub">Score 40-59 (Good)</div>
+          </div>
+          <div class="stat-card accent-purple">
+            <div class="stat-label">📅 Days Until Event</div>
+            <div class="stat-value" id="future-avg-days">—</div>
+            <div class="stat-sub">Avg days remaining</div>
+          </div>
+        </div>
+
+        <!-- Future Trades List -->
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title">🔮 Future Trades — Long-Horizon Opportunities (30+ Days)</span>
+            <span style="font-size:0.75rem;color:var(--text-muted)" id="future-count">Loading...</span>
+          </div>
+          <div id="future-list" class="approvals-container">
+            <div class="approvals-empty">
+              <p>Click "Refresh Future Trades" to load long-horizon opportunities</p>
+              <p style="font-size:0.75rem;color:var(--text-muted);margin-top:0.5rem">Shows opportunities with events strictly more than 30 days away, grouped by time horizon</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Reviewed Trades Table -->
+        <div class="card" style="margin-top:1.5rem">
+          <div class="card-header">
+            <span class="card-title">📋 Reviewed Trades</span>
+            <span style="font-size:0.75rem;color:var(--text-muted)" id="future-reviewed-count"></span>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Question</th>
+                  <th>Side</th>
+                  <th>Edge</th>
+                  <th>Tier</th>
+                  <th>AI Model</th>
+                  <th>Outcome</th>
+                  <th>Event Date</th>
+                </tr>
+              </thead>
+              <tbody id="future-reviewed-body">
+                <tr><td colspan="7" class="empty-row" style="color:var(--text-muted)">No reviewed trades yet — rate a pick as Win or Loss to see it here</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Opportunities Page -->
+      <div id="page-opportunities" class="page">
+        <div class="page-actions">
+          <button class="btn btn-primary" onclick="App.runScan()">🔍 Run AI Scan</button>
+          <select class="select" id="model-select" onchange="App.setModel(this.value)">
+            <option value="claude">Claude</option>
+            <option value="openai">GPT-4o</option>
+            <option value="gemini">Gemini</option>
+            <option value="openrouter">OpenRouter (Free)</option>
+            <option value="mock">Mock</option>
+          </select>
+        </div>
+        <div class="opp-grid" id="opp-grid">
+          <div class="opp-empty">Run a scan to discover opportunities</div>
+        </div>
+
+        <!-- Reviewed Opportunities Table -->
+        <div class="card" id="opp-reviewed-card" style="margin-top:1.5rem">
+          <div class="card-header">
+            <span class="card-title">📋 Reviewed Opportunities</span>
+            <span style="font-size:0.75rem;color:var(--text-muted)" id="opp-reviewed-count"></span>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Question</th>
+                  <th>Side</th>
+                  <th>Edge</th>
+                  <th>AI Model</th>
+                  <th>Outcome</th>
+                  <th>Scanned</th>
+                </tr>
+              </thead>
+              <tbody id="opp-reviewed-body">
+                <tr><td colspan="6" class="empty-row" style="color:var(--text-muted)">No reviewed opportunities yet — rate a trade as Win or Loss to see it here</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Trade History Page -->
+      <div id="page-trades" class="page">
+        <div class="page-actions">
+          <select class="select" id="trade-source-filter" onchange="App.loadTrades(this.value)">
+            <option value="">All Sources</option>
+            <option value="research">AI Research</option>
+            <option value="copy">Copy Trading</option>
+            <option value="manual">Manual</option>
+          </select>
+        </div>
+        <div class="card">
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr><th>#</th><th>Market</th><th>Side</th><th>Size</th><th>Price</th><th>P&L</th><th>Source</th><th>Model</th><th>Mode</th><th>Time</th></tr>
+              </thead>
+              <tbody id="trades-body">
+                <tr><td colspan="10" class="empty-row">No trades yet</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- My Profile Page -->
+      <div id="page-profile" class="page">
+
+        <!-- Hero -->
+        <div class="profile-hero">
+          <div class="profile-avatar" id="profile-avatar">?</div>
+          <div class="profile-info">
+            <div class="profile-name" id="profile-name">My Wallet</div>
+            <div class="profile-wallet">
+              <span id="profile-wallet-addr">—</span>
+              <button class="copy-btn" onclick="App.copyWallet()">Copy</button>
+            </div>
+            <div class="profile-sub">Polymarket On-Chain Account</div>
+          </div>
+          <div class="profile-hero-actions">
+            <button class="btn btn-primary btn-sm" onclick="App.loadProfile()">↺ Refresh</button>
+            <div class="profile-refresh-time" id="profile-refresh-time">Never loaded</div>
+          </div>
+        </div>
+
+        <!-- Computed stat cards — rendered by JS from real data -->
+        <div class="profile-stats-grid" id="profile-stats-grid">
+          <div class="stat-card" style="opacity:0.4"><div class="stat-label">Capital Deployed</div><div class="stat-value">—</div></div>
+          <div class="stat-card" style="opacity:0.4"><div class="stat-label">Unrealized P&amp;L</div><div class="stat-value">—</div></div>
+          <div class="stat-card" style="opacity:0.4"><div class="stat-label">Position Health</div><div class="stat-value">—</div></div>
+          <div class="stat-card" style="opacity:0.4"><div class="stat-label">Trade Volume</div><div class="stat-value">—</div></div>
+        </div>
+
+        <!-- Positions + Breakdown -->
+        <div class="profile-two-col">
+
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">Open Positions</span>
+              <span class="badge badge-research" id="pos-count-badge">loading...</span>
+            </div>
+            <div class="table-wrap">
+              <table class="data-table">
+                <thead>
+                  <tr><th>Market</th><th>Side</th><th>Deployed</th><th>Entry</th><th>Current</th><th>Unreal P&amp;L</th></tr>
+                </thead>
+                <tbody id="profile-positions-body">
+                  <tr><td colspan="6" class="empty-row">Click ↺ Refresh to load</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-header"><span class="card-title">Breakdown</span></div>
+            <div class="insight-list" id="profile-insights">
+              <div class="feed-empty">Click ↺ Refresh to load</div>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- Trade History -->
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title">On-Chain Trade History</span>
+            <span style="font-size:0.75rem;color:var(--text-muted)" id="trade-hist-count">—</span>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr><th>#</th><th>Market</th><th>Outcome</th><th>Action</th><th>Size (USD)</th><th>Price</th><th>Time</th></tr>
+              </thead>
+              <tbody id="profile-trades-body">
+                <tr><td colspan="7" class="empty-row">Click ↺ Refresh to load</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Consensus Trades Page -->
+      <div id="page-consensus" class="page">
+        <div class="page-actions">
+          <button class="btn btn-primary" onclick="App.loadConsensus()">🔄 Refresh</button>
+          <button class="btn btn-outline" onclick="App.refreshConsensusCache()">⚡ Force Reload Positions</button>
+          <div style="display:flex;align-items:center;gap:8px">
+            <label style="font-size:0.8rem;color:var(--text-muted)">Min traders:</label>
+            <select class="select" id="consensus-min-traders" onchange="App.loadConsensus()" style="width:auto;padding:4px 8px">
+              <option value="2">2+</option>
+              <option value="3" selected>3+</option>
+              <option value="4">4+</option>
+              <option value="5">5+</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Stats bar -->
+        <div class="stats-grid" style="margin-bottom:1.5rem">
+          <div class="stat-card accent-blue">
+            <div class="stat-label">Consensus Markets</div>
+            <div class="stat-value" id="consensus-total">—</div>
+            <div class="stat-sub">Shared positions found</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Trader Pool</div>
+            <div class="stat-value" id="consensus-pool">—</div>
+            <div class="stat-sub">Followed + leaderboard</div>
+          </div>
+          <div class="stat-card accent-green">
+            <div class="stat-label">Highest Agreement</div>
+            <div class="stat-value" id="consensus-max-traders">—</div>
+            <div class="stat-sub">Traders on top pick</div>
+          </div>
+          <div class="stat-card accent-purple">
+            <div class="stat-label">Cache Age</div>
+            <div class="stat-value" id="consensus-cache-age">—</div>
+            <div class="stat-sub">Position data freshness</div>
+          </div>
+        </div>
+
+        <!-- Consensus list -->
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title">🤝 Consensus Trades — Shared Top-Trader Positions</span>
+            <span style="font-size:0.75rem;color:var(--text-muted)" id="consensus-subtitle">Sorted by trader agreement</span>
+          </div>
+          <div id="consensus-list" class="approvals-container">
+            <div class="approvals-empty">
+              <p>Click "Refresh" to scan for consensus trades</p>
+              <p style="font-size:0.75rem;color:var(--text-muted);margin-top:0.5rem">Shows markets where multiple top traders hold the same position</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Rankings Page -->
+      <div id="page-rankings" class="page">
+        <div class="page-actions">
+          <div class="tab-group">
+            <button class="tab-btn active" data-filter="all" onclick="App.loadRankings('all')">All Time</button>
+            <button class="tab-btn" data-filter="30d" onclick="App.loadRankings('30d')">Last 30 Days</button>
+            <button class="tab-btn" data-filter="7d" onclick="App.loadRankings('7d')">Last 7 Days</button>
+          </div>
+          <button class="btn btn-outline" onclick="App.loadRankings(window._rankingsFilter || 'all')">🔄 Refresh</button>
+        </div>
+
+        <!-- Summary Stats -->
+        <div class="stats-grid" style="margin-bottom:1.5rem">
+          <div class="stat-card">
+            <div class="stat-label">Total Rated</div>
+            <div class="stat-value" id="rank-total">—</div>
+            <div class="stat-sub">Predictions marked</div>
+          </div>
+          <div class="stat-card accent-green">
+            <div class="stat-label">Success Rate</div>
+            <div class="stat-value" id="rank-rate">—</div>
+            <div class="stat-sub" id="rank-counts">— wins / — losses</div>
+          </div>
+          <div class="stat-card accent-blue">
+            <div class="stat-label">Best AI Model</div>
+            <div class="stat-value" id="rank-best-model" style="font-size:1.2rem">—</div>
+            <div class="stat-sub" id="rank-best-accuracy">Top performer</div>
+          </div>
+          <div class="stat-card accent-purple">
+            <div class="stat-label">Winning Trades</div>
+            <div class="stat-value" id="rank-wins">—</div>
+            <div class="stat-sub">Marked successful</div>
+          </div>
+        </div>
+
+        <!-- Two-column layout -->
+        <div class="rankings-layout">
+          <!-- Left: Top Winning Trades -->
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">🏆 Top Winning Trades</span>
+              <span style="font-size:0.75rem;color:var(--text-muted)">AI picks rated as wins, ranked by edge</span>
+            </div>
+            <div id="rankings-top-trades">
+              <div class="rank-empty">
+                <div style="font-size:2.5rem;margin-bottom:12px">🏆</div>
+                <p>No winning trades yet</p>
+                <p class="rank-empty-hint">Mark opportunities as ✓ Win on any page to see them ranked here</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Right column -->
+          <div>
+            <!-- AI Model Performance -->
+            <div class="card" style="margin-bottom:1.5rem">
+              <div class="card-header">
+                <span class="card-title">🤖 AI Model Performance</span>
+                <span style="font-size:0.75rem;color:var(--text-muted)">By prediction accuracy</span>
+              </div>
+              <div class="table-wrap">
+                <table class="data-table">
+                  <thead>
+                    <tr><th>Model</th><th>Accuracy</th><th>Wins</th><th>Losses</th><th>Avg Edge</th></tr>
+                  </thead>
+                  <tbody id="rankings-ai-body">
+                    <tr><td colspan="5" class="empty-row">No data — mark outcomes to track model accuracy</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <!-- Trader Leaderboard -->
+            <div class="card">
+              <div class="card-header">
+                <span class="card-title">👥 Trader Leaderboard</span>
+                <span style="font-size:0.75rem;color:var(--text-muted)">Your followed traders by ROI</span>
+              </div>
+              <div class="table-wrap">
+                <table class="data-table">
+                  <thead>
+                    <tr><th>Rank</th><th>Trader</th><th>ROI</th><th>Polymarket W%</th><th>Your Rating</th><th>Profit</th></tr>
+                  </thead>
+                  <tbody id="rankings-traders-body">
+                    <tr><td colspan="6" class="empty-row">No tracked traders — follow traders on the Copy Traders page</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Settings Page -->
+      <div id="page-settings" class="page">
+        <div class="settings-grid">
+          <div class="card settings-card">
+            <div class="card-header"><span class="card-title">Bot Configuration</span></div>
+            <div class="settings-form">
+              <div class="field-group">
+                <label>Trading Mode</label>
+                <div class="radio-group">
+                  <label class="radio-label"><input type="radio" name="mode" value="paper" id="mode-paper" onchange="App.setMode('paper')" checked /> Paper Trading</label>
+                  <label class="radio-label"><input type="radio" name="mode" value="live" id="mode-live" onchange="App.setMode('live')" /> Live Trading ⚠️</label>
+                </div>
+              </div>
+              <div class="field-group">
+                <label>AI Model</label>
+                <select class="select full-width" onchange="App.setModel(this.value)" id="settings-model">
+                  <option value="claude">Claude (Anthropic)</option>
+                  <option value="openai">GPT-4o (OpenAI)</option>
+                  <option value="gemini">Gemini (Google)</option>
+                  <option value="openrouter">OpenRouter (Free)</option>
+                  <option value="mock">Mock (Testing)</option>
+                </select>
+              </div>
+              <div class="field-group">
+                <label>Paper Balance</label>
+                <button class="btn btn-outline full-width" onclick="App.fundAccount()">💰 Add Funds</button>
+              </div>
+              <div class="field-group">
+                <label>Scan Interval</label>
+                <p class="settings-note">Set in .env — SCAN_INTERVAL_MINUTES</p>
+              </div>
+              <div class="field-group">
+                <label>Min Edge %</label>
+                <p class="settings-note">Set in .env — MIN_EDGE_PERCENT</p>
+              </div>
+            </div>
+          </div>
+          <div class="card settings-card">
+            <div class="card-header"><span class="card-title">System Info</span></div>
+            <div class="info-list" id="sys-info"></div>
+          </div>
+          <div class="card settings-card">
+            <div class="card-header"><span class="card-title">🧹 Database Maintenance</span></div>
+            <div class="settings-form">
+              <div id="cleanup-stats" style="margin-bottom:1rem">
+                <p style="font-size:0.85rem;color:var(--text-muted)">Loading cleanup stats...</p>
+              </div>
+              <div class="field-group">
+                <button class="btn btn-primary" onclick="App.loadCleanupStats()">📊 Refresh Stats</button>
+                <button class="btn btn-danger" onclick="App.runCleanup()" id="cleanup-btn" style="margin-left:0.5rem">🗑️ Clean Expired Data</button>
+              </div>
+              <p class="settings-note">Removes opportunities where events have ended and data older than 7 days</p>
+              <div id="cleanup-result" style="margin-top:0.75rem;font-size:0.8rem"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── AI Assistant Page ──────────────────────────────────────────────── -->
+      <div id="page-assistant" class="page">
+        <div class="assistant-page-layout">
+
+          <!-- Left: Chat Interface -->
+          <div class="assistant-chat-col">
+            <div class="assistant-chat-container">
+              <!-- Chat Header -->
+              <div class="assistant-chat-header">
+                <div class="assistant-chat-header-left">
+                  <div class="assistant-avatar">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><circle cx="9" cy="10" r="1" fill="currentColor" stroke="none"/><circle cx="12" cy="10" r="1" fill="currentColor" stroke="none"/><circle cx="15" cy="10" r="1" fill="currentColor" stroke="none"/></svg>
+                  </div>
+                  <div>
+                    <div class="assistant-chat-title">AI Trading Assistant</div>
+                    <div class="assistant-chat-subtitle" id="page-chat-status">Powered by OpenRouter · Context-aware</div>
+                  </div>
+                </div>
+                <button class="btn btn-sm btn-outline" onclick="AssistantUI.clearPageChat()" title="Clear conversation">Clear chat</button>
+              </div>
+
+              <!-- Messages -->
+              <div class="assistant-messages" id="page-chat-messages">
+                <div class="assistant-welcome">
+                  <div class="assistant-welcome-icon">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" width="32" height="32"><path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm0 18a8 8 0 1 1 8-8 8 8 0 0 1-8 8zm-1-5h2v2h-2zm0-8h2v6h-2z"/></svg>
+                  </div>
+                  <h3 class="assistant-welcome-title">Ready to help with your trades</h3>
+                  <p class="assistant-welcome-sub">I have live access to your portfolio, open positions, recent trades, and AI-discovered opportunities. Ask me anything.</p>
+                </div>
+              </div>
+
+              <!-- Quick Prompts -->
+              <div class="assistant-chips" id="page-chat-chips">
+                <button class="chat-chip" onclick="AssistantUI.sendPageQuick('Analyze my current portfolio and identify areas to improve')">Analyze portfolio</button>
+                <button class="chat-chip" onclick="AssistantUI.sendPageQuick('What are the highest-confidence trading opportunities available right now?')">Top opportunities</button>
+                <button class="chat-chip" onclick="AssistantUI.sendPageQuick('Review my recent trades and explain my win/loss pattern')">Win/loss review</button>
+                <button class="chat-chip" onclick="AssistantUI.sendPageQuick('Which copy traders should I trust based on their signal history?')">Copy trader trust</button>
+                <button class="chat-chip" onclick="AssistantUI.sendPageQuick('What is my risk exposure across open positions right now?')">Risk exposure</button>
+                <button class="chat-chip" onclick="AssistantUI.sendPageQuick('Explain how edge percentage and confidence work in prediction markets')">How edge works</button>
+              </div>
+
+              <!-- Rate bar -->
+              <div class="chat-rate-bar" id="page-chat-rate-bar" style="display:none">
+                <span id="page-chat-rate-text">12 messages remaining this minute</span>
+              </div>
+
+              <!-- Input -->
+              <div class="assistant-input-area">
+                <textarea
+                  class="assistant-input"
+                  id="page-chat-input"
+                  placeholder="Ask about a trade, market, position, or strategy..."
+                  rows="1"
+                  maxlength="2000"
+                  onkeydown="AssistantUI.onPageKeyDown(event)"
+                  oninput="AssistantUI.autoResizePage(this)"
+                ></textarea>
+                <button class="assistant-send-btn" id="page-chat-send" onclick="AssistantUI.sendPage()" title="Send (Enter)">
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Right: Context Panel -->
+          <div class="assistant-context-col">
+            <div class="card" style="height:100%;display:flex;flex-direction:column;overflow:hidden">
+              <div class="card-header"><span class="card-title">Live Context</span></div>
+              <div class="assistant-context-body" id="assistant-context-panel">
+                <div class="feed-empty">Loading context...</div>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- Trade Journal Page -->
+      <div id="page-journal" class="page">
+        <div class="page-actions" style="justify-content:space-between;align-items:center">
+          <div style="display:flex;gap:8px;align-items:center">
+            <span id="journal-count" style="font-size:0.8rem;color:var(--text-muted)">Loading...</span>
+          </div>
+          <button class="btn btn-primary" onclick="App.openJournalModal('manual','','','YES',0,0,'')">+ Add Entry</button>
+        </div>
+
+        <!-- Filter Row -->
+        <div class="journal-filters" id="journal-filter-row">
+          <button class="journal-filter-pill active" data-filter="" onclick="App.filterJournal(this,'')">All</button>
+          <button class="journal-filter-pill" data-filter="opportunity" onclick="App.filterJournal(this,'opportunity')">Opportunities</button>
+          <button class="journal-filter-pill" data-filter="trade" onclick="App.filterJournal(this,'trade')">Trades</button>
+          <button class="journal-filter-pill" data-filter="copy_signal" onclick="App.filterJournal(this,'copy_signal')">Copy Signals</button>
+          <button class="journal-filter-pill" data-filter="manual" onclick="App.filterJournal(this,'manual')">Manual</button>
+        </div>
+
+        <!-- Journal List -->
+        <div id="journal-list" class="journal-list">
+          <div class="feed-empty" id="journal-empty">Loading journal entries...</div>
+        </div>
+      </div>
+
+    </main>
+  </div>
+
+  <!-- Add Trader Modal -->
+  <div id="modal-overlay" class="modal-overlay" style="display:none" onclick="App.closeModal()">
+    <div class="modal" onclick="event.stopPropagation()">
+      <div class="modal-header">Add Trader Wallet</div>
+      <div class="modal-body">
+        <div class="field-group">
+          <label>Wallet Address</label>
+          <input type="text" id="trader-address" class="input" placeholder="0x..." />
+        </div>
+        <div class="field-group">
+          <label>Display Name (optional)</label>
+          <input type="text" id="trader-name" class="input" placeholder="Trader nickname" />
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline" onclick="App.closeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="App.addTrader()">Add Trader</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Journal Modal -->
+  <div id="journal-modal-overlay" class="modal-overlay" style="display:none" onclick="App.closeJournalModal()">
+    <div class="modal" onclick="event.stopPropagation()" style="max-width:520px;width:100%">
+      <div class="modal-header">
+        <span id="journal-modal-title">Add to Journal</span>
+      </div>
+      <div class="modal-body">
+        <div id="journal-modal-market" style="padding:8px 12px;background:rgba(99,102,241,0.08);border:1px solid var(--border);border-radius:var(--radius-sm);margin-bottom:12px;font-size:0.82rem;color:var(--text);line-height:1.4;display:none"></div>
+        <div class="field-group" id="journal-manual-market" style="display:none">
+          <label>Market / Question</label>
+          <input type="text" id="journal-manual-question" class="input" placeholder="What is the market question?" />
+        </div>
+        <div class="field-group" id="journal-manual-side-group" style="display:none">
+          <label>Side</label>
+          <div style="display:flex;gap:8px">
+            <button class="btn btn-outline btn-sm journal-side-btn" id="journal-side-yes" onclick="App._setJournalSide('YES')">YES</button>
+            <button class="btn btn-outline btn-sm journal-side-btn" id="journal-side-no" onclick="App._setJournalSide('NO')">NO</button>
+          </div>
+        </div>
+        <div class="field-group">
+          <label>Notes <span style="color:var(--text-muted);font-size:0.75rem">(your thesis, concerns, reasons)</span></label>
+          <textarea id="journal-notes" class="input" rows="3" placeholder="What's your thesis? Any concerns? Why are you watching this market?" style="resize:vertical"></textarea>
+        </div>
+        <div class="field-group">
+          <label>Tags <span style="color:var(--text-muted);font-size:0.75rem">(comma-separated)</span></label>
+          <input type="text" id="journal-tags" class="input" placeholder="e.g. geopolitics, high-edge, copy-signal" />
+        </div>
+        <div class="field-group">
+          <label>Rating</label>
+          <div class="star-rating" id="journal-rating-stars">
+            <span class="star" data-val="1" onclick="App._setJournalRating(1)">☆</span>
+            <span class="star" data-val="2" onclick="App._setJournalRating(2)">☆</span>
+            <span class="star" data-val="3" onclick="App._setJournalRating(3)">☆</span>
+            <span class="star" data-val="4" onclick="App._setJournalRating(4)">☆</span>
+            <span class="star" data-val="5" onclick="App._setJournalRating(5)">☆</span>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline" onclick="App.closeJournalModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="App.saveJournal()">Save to Journal</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── AI Trading Assistant ─────────────────────────────────────────────── -->
+
+  <!-- Floating Action Button -->
+  <button class="chat-fab" id="chat-fab" onclick="AssistantUI.toggle()" title="AI Trading Assistant" aria-label="Open AI trading assistant">
+    <svg class="chat-fab-icon chat-fab-icon--open" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><circle cx="12" cy="10" r="1" fill="currentColor" stroke="none"/><circle cx="8" cy="10" r="1" fill="currentColor" stroke="none"/><circle cx="16" cy="10" r="1" fill="currentColor" stroke="none"/></svg>
+    <svg class="chat-fab-icon chat-fab-icon--close" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+    <span class="chat-fab-badge" id="chat-unread" style="display:none">1</span>
+  </button>
+
+  <!-- Chat Panel -->
+  <div class="chat-panel" id="chat-panel" role="dialog" aria-label="AI Trading Assistant" aria-hidden="true">
+    <!-- Header -->
+    <div class="chat-header">
+      <div class="chat-header-info">
+        <div class="chat-avatar-sm">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="14" height="14"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        </div>
+        <div>
+          <div class="chat-header-title">AI Trading Assistant</div>
+          <div class="chat-header-sub" id="chat-status-label">Ask me anything about your trades</div>
+        </div>
+      </div>
+      <div class="chat-header-actions">
+        <button class="chat-icon-btn" onclick="AssistantUI.clearChat()" title="Clear conversation" aria-label="Clear conversation">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="15" height="15"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg>
+        </button>
+        <button class="chat-icon-btn" onclick="AssistantUI.toggle()" title="Close" aria-label="Close chat">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" width="15" height="15"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- Messages -->
+    <div class="chat-messages" id="chat-messages" role="log" aria-live="polite">
+      <div class="chat-welcome">
+        <div class="chat-welcome-icon">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" width="28" height="28"><path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm0 18a8 8 0 1 1 8-8 8 8 0 0 1-8 8zm-1-5h2v2h-2zm0-8h2v6h-2z"/></svg>
+        </div>
+        <p class="chat-welcome-title">Trading Assistant</p>
+        <p class="chat-welcome-sub">I have live context on your portfolio, trades, and AI-discovered opportunities. Ask me anything.</p>
+      </div>
+    </div>
+
+    <!-- Quick Prompts -->
+    <div class="chat-chips" id="chat-chips">
+      <button class="chat-chip" onclick="AssistantUI.sendQuick('Analyze my current portfolio performance and suggest improvements')">Analyze portfolio</button>
+      <button class="chat-chip" onclick="AssistantUI.sendQuick('What are the best trading opportunities right now and why?')">Best opportunities</button>
+      <button class="chat-chip" onclick="AssistantUI.sendQuick('Explain my recent win/loss pattern and what I can improve')">Win/loss pattern</button>
+      <button class="chat-chip" onclick="AssistantUI.sendQuick('Should I trust the copy trading signals from followed traders?')">Copy signals</button>
+    </div>
+
+    <!-- Rate limit bar -->
+    <div class="chat-rate-bar" id="chat-rate-bar" style="display:none">
+      <span id="chat-rate-text">12 messages remaining</span>
+    </div>
+
+    <!-- Input -->
+    <div class="chat-input-area">
+      <textarea
+        class="chat-input"
+        id="chat-input"
+        placeholder="Ask about a trade, opportunity, or strategy..."
+        rows="1"
+        maxlength="2000"
+        aria-label="Chat message input"
+        onkeydown="AssistantUI.onKeyDown(event)"
+        oninput="AssistantUI.autoResize(this)"
+      ></textarea>
+      <button class="chat-send-btn" id="chat-send-btn" onclick="AssistantUI.send()" aria-label="Send message" title="Send (Enter)">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <script src="/static/app.js?v=20"></script>
+</body>
+</html>
