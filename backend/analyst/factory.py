@@ -15,14 +15,14 @@ logger = logging.getLogger(__name__)
 class ClaudeAnalyst(BaseAnalyst):
     model_name = "claude"
 
-    def __init__(self, api_key: str, model: str = "claude-3-5-sonnet-20241022"):
+    def __init__(self, api_key: str, model: str = "claude-sonnet-4-5"):
         self.client = anthropic.AsyncAnthropic(api_key=api_key)
         self.model = model
 
     async def _call_model(self, prompt: str) -> str:
         message = await self.client.messages.create(
             model=self.model,
-            max_tokens=4096,
+            max_tokens=1500,
             messages=[{"role": "user", "content": prompt}],
         )
         return message.content[0].text
@@ -41,7 +41,7 @@ class OpenAIAnalyst(BaseAnalyst):
         response = await self.client.chat.completions.create(
             model=self.model,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=4096,
+            max_tokens=1500,
             response_format={"type": "json_object"},
         )
         # gpt-4o with json_object might wrap in {"opportunities": [...]}
@@ -71,31 +71,15 @@ class GeminiAnalyst(BaseAnalyst):
         self.model_id = model
 
     async def _call_model(self, prompt: str) -> str:
-        # Fallback sequence for 2026 models
-        fallbacks = [self.model_id, "gemini-3-flash", "gemini-3.1-flash-lite", "gemini-3.1-pro"]
-
-        last_err = None
-        for model_name in fallbacks:
-            try:
-                # Wrap synchronous SDK call in a thread to avoid blocking the event loop
-                response = await asyncio.to_thread(
-                    self.client.models.generate_content,
-                    model=model_name,
-                    contents=prompt,
-                )
-                if response and response.text:
-                    if model_name != self.model_id:
-                        logger.info(f"Switched to working Gemini model: {model_name}")
-                        self.model_id = model_name
-                    return response.text
-            except Exception as e:
-                last_err = e
-                if "404" in str(e) or "INVALID_ARGUMENT" in str(e):
-                    continue
-                raise
-
-        logger.error(f"Gemini API failed after fallbacks. Check your API key. Last error: {last_err}")
-        raise last_err
+        # Wrap synchronous SDK call in a thread to avoid blocking the event loop
+        response = await asyncio.to_thread(
+            self.client.models.generate_content,
+            model=self.model_id,
+            contents=prompt,
+        )
+        if not (response and response.text):
+            raise RuntimeError(f"Gemini {self.model_id} returned empty content")
+        return response.text
 
 
 # ── Mock (for testing) ─────────────────────────────────────────────────────────
@@ -135,12 +119,23 @@ class OpenRouterAnalyst(BaseAnalyst):
         self.client = openai_lib.AsyncOpenAI(
             api_key=api_key,
             base_url="https://openrouter.ai/api/v1",
+            timeout=90.0,
         )
         self.model = model
         self._extra_headers = {
             "HTTP-Referer": "https://github.com/polymarket-bot", # For OpenRouter rankings
             "X-Title": "Polymarket Bot",
         }
+        # Free models cap total context+completion tokens; start modest and adapt
+        # to whatever the account can actually afford (see 402 handling below).
+        self.max_tokens = 1200
+
+    @staticmethod
+    def _affordable_tokens(err_text: str) -> int | None:
+        """Parse OpenRouter's 'can only afford N tokens' message from a 402 error."""
+        import re
+        m = re.search(r"can only afford (\d+) tokens", err_text)
+        return int(m.group(1)) if m else None
 
     async def _call_model(self, prompt: str) -> str:
         # Ordered fallback list — tries each model in sequence if the previous is unavailable.
@@ -160,30 +155,44 @@ class OpenRouterAnalyst(BaseAnalyst):
 
         last_err = None
         for model_name in ordered:
-            try:
-                response = await self.client.chat.completions.create(
-                    model=model_name,
-                    messages=[{"role": "user", "content": prompt}],
-                    extra_headers=self._extra_headers,
-                    max_tokens=4096,
-                )
-                content = response.choices[0].message.content if response.choices else None
-                if content:
-                    if model_name != self.model:
-                        logger.info(f"OpenRouter: switched to {model_name}")
-                        self.model = model_name
-                    return content
-                logger.warning(f"OpenRouter {model_name} returned empty content, trying next")
-            except Exception as e:
-                last_err = e
-                err_str = str(e)
-                if any(code in err_str for code in ("404", "503", "502", "529")):
-                    logger.warning(f"OpenRouter {model_name} unavailable ({err_str[:60]}), trying next")
-                    continue
-                if "429" in err_str:
-                    logger.warning(f"OpenRouter {model_name} rate-limited, trying next")
-                    continue
-                raise
+            for attempt in range(2):  # one chance to adapt to the account's token budget
+                try:
+                    response = await self.client.chat.completions.create(
+                        model=model_name,
+                        messages=[{"role": "user", "content": prompt}],
+                        extra_headers=self._extra_headers,
+                        max_tokens=self.max_tokens,
+                    )
+                    content = response.choices[0].message.content if response.choices else None
+                    if content:
+                        if model_name != self.model:
+                            logger.info(f"OpenRouter: switched to {model_name}")
+                            self.model = model_name
+                        return content
+                    logger.warning(f"OpenRouter {model_name} returned empty content, trying next")
+                    break  # empty content isn't a budget problem — move to next model
+                except Exception as e:
+                    last_err = e
+                    err_str = str(e)
+                    if "402" in err_str:
+                        affordable = self._affordable_tokens(err_str)
+                        if affordable and affordable - 64 < self.max_tokens:
+                            # Shrink the completion budget to fit the account and retry
+                            self.max_tokens = max(256, affordable - 64)
+                            logger.warning(
+                                f"OpenRouter {model_name}: 402 budget error — retrying with "
+                                f"max_tokens={self.max_tokens}"
+                            )
+                            continue
+                        logger.warning(f"OpenRouter {model_name} out of credits, trying next")
+                        break
+                    if any(code in err_str for code in ("404", "400", "503", "502", "529")):
+                        logger.warning(f"OpenRouter {model_name} unavailable ({err_str[:60]}), trying next")
+                        break  # model not found — don't retry same model
+                    if "429" in err_str:
+                        await asyncio.sleep(2)
+                        continue  # rate-limited — one patient retry
+                    raise
 
         logger.error(f"All OpenRouter models failed. Last error: {last_err}")
         raise last_err or RuntimeError("All OpenRouter fallback models exhausted")
@@ -197,15 +206,15 @@ def get_analyst(model: str, settings) -> BaseAnalyst:
     if model == "claude":
         if not settings.anthropic_api_key:
             raise ValueError("ANTHROPIC_API_KEY is not set")
-        return ClaudeAnalyst(api_key=settings.anthropic_api_key)
+        return ClaudeAnalyst(api_key=settings.anthropic_api_key, model=settings.anthropic_model)
     elif model == "openai":
         if not settings.openai_api_key:
             raise ValueError("OPENAI_API_KEY is not set")
-        return OpenAIAnalyst(api_key=settings.openai_api_key)
+        return OpenAIAnalyst(api_key=settings.openai_api_key, model=settings.openai_model)
     elif model == "gemini":
         if not settings.google_api_key:
             raise ValueError("GOOGLE_API_KEY is not set")
-        return GeminiAnalyst(api_key=settings.google_api_key)
+        return GeminiAnalyst(api_key=settings.google_api_key, model=settings.gemini_model)
     elif model == "openrouter":
         if not settings.openrouter_api_key:
             raise ValueError("OPENROUTER_API_KEY is not set")

@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from backend.config import get_settings
-from backend.database import init_db, get_db, SessionLocal, Trade, MarketOpportunity, CopyTrader, CopySignal, JournalEntry
+from backend.database import init_db, get_db, SessionLocal, Trade, MarketOpportunity, CopyTrader, CopySignal, JournalEntry, Position
 from backend.polymarket.client import PolymarketClient
 from backend.polymarket.consensus import ConsensusEngine
 from backend.polymarket.copy_trader import CopyTradingEngine
@@ -23,6 +23,8 @@ from backend.polymarket.researcher import MarketResearcher
 from backend.analyst import get_analyst
 from backend.trader.executor import TradeExecutor
 from backend.trader.portfolio import Portfolio
+from backend.trader.risk import RiskManager
+from backend import analytics
 from backend.assistant import AssistantService, build_platform_context
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -37,10 +39,21 @@ _executor = None
 _portfolio = None
 _copy_engine = None
 _researcher = None
+_risk = None
 _assistant: Optional["AssistantService"] = None
 _consensus_engine: Optional["ConsensusEngine"] = None
 
 bot_state: dict = {}
+
+
+def quality_momentum_bonus(momentum_24h, side) -> float:
+    """±10 quality points for tape corroboration (price moving toward our side)."""
+    if momentum_24h is None:
+        return 0.0
+    s = (side or "YES").upper()
+    aligned = (s == "YES" and momentum_24h > 0.01) or (s == "NO" and momentum_24h < -0.01)
+    opposed = (s == "YES" and momentum_24h < -0.01) or (s == "NO" and momentum_24h > 0.01)
+    return 10.0 if aligned else -10.0 if opposed else 0.0
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 
@@ -110,6 +123,7 @@ async def select_and_process_opportunities(opportunities: list[dict]):
             price=selected.get("yes_price", 0.5) if resolved_side == "YES" else selected.get("no_price", 0.5),
             source="research",
             model_used=settings.ai_model,
+            token_id=(selected.get("yes_token_id") if resolved_side == "YES" else selected.get("no_token_id")) or "",
         )
         await ws_manager.broadcast({"event": "trade_executed", "trade": trade})
     else:
@@ -186,6 +200,7 @@ async def run_copy_cycle():
                             size_usd=sig["copied_size"],
                             price=sig["price"],
                             source="copy",
+                            token_id=sig.get("token_id", ""),
                         )
                         if trade.get("status") == "filled" and sig.get("_signal_id"):
                             _copy_engine.mark_signal_executed(sig["_signal_id"])
@@ -265,7 +280,7 @@ _bot_task: Optional[asyncio.Task] = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global settings, _poly_client, _analyst, _executor, _portfolio, _copy_engine, _researcher, _assistant, _consensus_engine, bot_state
+    global settings, _poly_client, _analyst, _executor, _portfolio, _copy_engine, _researcher, _assistant, _consensus_engine, _risk, bot_state
 
     settings = get_settings()
     _poly_client = PolymarketClient(
@@ -276,11 +291,23 @@ async def lifespan(app: FastAPI):
         wallet_address_override=settings.poly_wallet_address,
     )
     _analyst = get_analyst(settings.ai_model, settings)
+    global _risk
+    _risk = RiskManager(
+        kelly_fraction=settings.kelly_fraction,
+        max_position_pct=settings.max_position_pct,
+        max_open_positions=settings.max_open_positions,
+        max_event_exposure_pct=settings.max_event_exposure_pct,
+        max_total_exposure_pct=settings.max_total_exposure_pct,
+        weekly_drawdown_limit_pct=settings.weekly_drawdown_limit_pct,
+        max_spread_edge_ratio=settings.max_spread_edge_ratio,
+        use_kelly_sizing=settings.use_kelly_sizing,
+    )
     _executor = TradeExecutor(
         paper_mode=settings.paper_mode,
-        client=_poly_client if not settings.paper_mode else None,
+        client=_poly_client,  # always wired so paper→live switching can place real orders
         paper_balance=settings.paper_balance,
         max_daily_spend=settings.max_daily_spend,
+        risk_manager=_risk,
     )
     _portfolio = Portfolio()
     _copy_engine = CopyTradingEngine(
@@ -330,6 +357,8 @@ async def lifespan(app: FastAPI):
     global _bot_task
     if _bot_task:
         _bot_task.cancel()
+    await _poly_client.aclose()
+    logger.info("Polymarket client closed")
 
 # ── App ────────────────────────────────────────────────────────────────────────
 
@@ -408,6 +437,17 @@ class ModeRequest(BaseModel):
 async def set_mode(req: ModeRequest):
     if req.mode not in ("paper", "live"):
         raise HTTPException(400, "mode must be 'paper' or 'live'")
+    if req.mode == "live":
+        # Validate real-money prerequisites BEFORE switching
+        if not settings.poly_private_key:
+            raise HTTPException(400, "Cannot switch to live: POLY_PRIVATE_KEY is not set in .env")
+        try:
+            import polymarket  # noqa: F401
+        except ImportError:
+            raise HTTPException(400, "Cannot switch to live: official SDK missing — pip install polymarket-client")
+        if not _poly_client.wallet_address:
+            raise HTTPException(400, "Cannot switch to live: wallet address could not be derived/set (POLY_PRIVATE_KEY or POLY_WALLET_ADDRESS)")
+        _executor.client = _poly_client
     bot_state["mode"] = req.mode
     _executor.paper_mode = req.mode == "paper"
     await ws_manager.broadcast({"event": "mode_changed", "mode": req.mode})
@@ -881,6 +921,7 @@ class ManualTradeRequest(BaseModel):
     side: str
     size_usd: float
     price: float
+    token_id: str = ""  # optional CLOB token id (required for live; resolved if missing)
 
 @app.post("/api/trade")
 async def manual_trade(req: ManualTradeRequest):
@@ -891,6 +932,7 @@ async def manual_trade(req: ManualTradeRequest):
         size_usd=req.size_usd,
         price=req.price,
         source="manual",
+        token_id=req.token_id,
     )
     await ws_manager.broadcast({"event": "trade_executed", "trade": trade})
     return trade
@@ -971,6 +1013,8 @@ async def get_dashboard_pending_trades():
                     "confidence": opp.confidence,
                     "model_used": opp.model_used,
                     "analysis": opp.analysis,
+                    "yes_token_id": opp.yes_token_id or "",
+                    "no_token_id": opp.no_token_id or "",
                     "outcome": opp.outcome,
                     "outcome_marked_at": opp.outcome_marked_at.isoformat() if opp.outcome_marked_at else None,
                 },

@@ -13,26 +13,31 @@ class Portfolio:
     def get_summary(self, paper_balance: float = 0.0) -> dict:
         db = SessionLocal()
         try:
-            # Aggregate at the SQL level — avoids loading all rows into memory
+            # Aggregate at the SQL level — avoids loading all rows into memory.
+            # "filled" = entries, "closed" = monitor exits; realized PnL lives in
+            # rows with a non-null pnl (fills that closed an opposite + all exits).
             result = db.query(
-                func.coalesce(func.sum(Trade.size), 0.0).label("total_invested"),
+                func.coalesce(func.sum(case((Trade.status == "filled", Trade.size), else_=0.0)), 0.0).label("total_invested"),
                 func.coalesce(func.sum(Trade.pnl), 0.0).label("total_pnl"),
                 func.count(Trade.id).label("total_trades"),
+                func.count(Trade.pnl).label("resolved"),
                 func.sum(case((Trade.pnl > 0, 1), else_=0)).label("wins"),
-            ).filter(Trade.status == "filled").one()
+            ).filter(Trade.status.in_(["filled", "closed"])).one()
 
-            total_trades = result.total_trades or 0
+            resolved = result.resolved or 0
             wins = result.wins or 0
-            win_rate = (wins / total_trades * 100) if total_trades else 0
+            win_rate = (wins / resolved * 100) if resolved else 0
             open_positions = db.query(func.count(Position.id)).scalar() or 0
+            unrealized = db.query(func.coalesce(func.sum(Position.pnl), 0.0)).scalar() or 0.0
 
             return {
                 "paper_balance": round(paper_balance, 2),
                 "total_invested": round(float(result.total_invested), 2),
                 "total_pnl": round(float(result.total_pnl), 2),
-                "total_trades": total_trades,
+                "unrealized_pnl": round(float(unrealized), 2),
+                "total_trades": result.total_trades or 0,
                 "wins": wins,
-                "losses": total_trades - wins,
+                "losses": resolved - wins,
                 "win_rate": round(win_rate, 1),
                 "open_positions": open_positions,
             }
@@ -91,7 +96,7 @@ class Portfolio:
             db.close()
 
     def get_daily_pnl(self, days: int = 30) -> list[dict]:
-        """Return daily P&L for charting, aggregated in SQL."""
+        """Return daily P&L for charting, aggregated in SQL (entries + exits)."""
         db = SessionLocal()
         try:
             cutoff = datetime.utcnow() - timedelta(days=days)
@@ -100,7 +105,7 @@ class Portfolio:
                     func.date(Trade.timestamp).label("day"),
                     func.coalesce(func.sum(Trade.pnl), 0.0).label("pnl"),
                 )
-                .filter(Trade.status == "filled", Trade.timestamp >= cutoff)
+                .filter(Trade.status.in_(["filled", "closed"]), Trade.timestamp >= cutoff)
                 .group_by(func.date(Trade.timestamp))
                 .order_by(func.date(Trade.timestamp))
                 .all()

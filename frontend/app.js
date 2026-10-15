@@ -254,6 +254,7 @@ async function approveTrade(index) {
     side: side,
     size_usd: size,
     price: price,
+    token_id: side === "YES" ? (opp.yes_token_id || "") : (opp.no_token_id || ""),
   });
 
   if (result.status === "filled" || result.status === "pending") {

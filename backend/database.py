@@ -47,6 +47,9 @@ class Position(Base):
     pnl = Column(Float, default=0.0)
     mode = Column(String)
     source = Column(String)
+    token_id = Column(String, nullable=True)        # CLOB token of the held outcome (live exits)
+    event_key = Column(String, nullable=True, index=True)  # negRisk/event grouping for exposure caps
+    est_prob = Column(Float, nullable=True)          # model's YES probability at entry (edge-evaporation exits)
     opened_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -61,6 +64,7 @@ class CopyTrader(Base):
     total_profit = Column(Float, default=0.0)
     volume = Column(Float, default=0.0)
     active = Column(Boolean, default=True)
+    last_position_poll = Column(DateTime, nullable=True)  # first-poll seeding watermark
     added_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -96,10 +100,14 @@ class MarketOpportunity(Base):
     analysis = Column(Text)
     trader_matches = Column(Text)   # JSON array of trader names/addresses aligned with this trade
     end_date = Column(String)       # Event date for sorting pending approvals
+    yes_token_id = Column(String, nullable=True)  # CLOB token id — required for live orders
+    no_token_id = Column(String, nullable=True)
     scanned_at = Column(DateTime, default=datetime.utcnow)
     outcome = Column(String, nullable=True)           # 'success' | 'failure'
     outcome_marked_at = Column(DateTime, nullable=True)
     flagged_for_approval = Column(Boolean, default=False)
+    estimated_prob = Column(Float, nullable=True)     # model's true-probability estimate (calibration)
+    momentum_24h = Column(Float, nullable=True)       # YES price change over 24h at scan time (corroboration)
 
 
 class TraderPositionState(Base):
@@ -108,7 +116,17 @@ class TraderPositionState(Base):
     id = Column(Integer, primary_key=True)
     trader_address = Column(String, index=True)
     market_id = Column(String, index=True)
+    side = Column(String, nullable=True)          # outcome held (YES|NO)
+    last_event_ts = Column(Integer, nullable=True)  # unix ts of position's last on-chain event
     last_seen_at = Column(DateTime, default=datetime.utcnow)
+
+
+class StateKV(Base):
+    """Tiny key-value store for bot state that must survive restarts (risk anchors etc.)."""
+    __tablename__ = "state_kv"
+    key = Column(String, primary_key=True)
+    value = Column(Text)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class JournalEntry(Base):
@@ -137,8 +155,19 @@ def init_db():
             "ALTER TABLE market_opportunities ADD COLUMN outcome VARCHAR",
             "ALTER TABLE market_opportunities ADD COLUMN outcome_marked_at DATETIME",
             "ALTER TABLE market_opportunities ADD COLUMN flagged_for_approval BOOLEAN DEFAULT 0",
+            "ALTER TABLE market_opportunities ADD COLUMN yes_token_id VARCHAR",
+            "ALTER TABLE market_opportunities ADD COLUMN no_token_id VARCHAR",
             "ALTER TABLE copy_signals ADD COLUMN outcome VARCHAR",
             "ALTER TABLE copy_signals ADD COLUMN outcome_marked_at DATETIME",
+            "ALTER TABLE copy_traders ADD COLUMN last_position_poll DATETIME",
+            "ALTER TABLE trader_position_states ADD COLUMN side VARCHAR",
+            "ALTER TABLE trader_position_states ADD COLUMN last_event_ts INTEGER",
+            "ALTER TABLE positions ADD COLUMN token_id VARCHAR",
+            "ALTER TABLE positions ADD COLUMN event_key VARCHAR",
+            "ALTER TABLE positions ADD COLUMN est_prob FLOAT",
+            "ALTER TABLE market_opportunities ADD COLUMN estimated_prob FLOAT",
+            "ALTER TABLE market_opportunities ADD COLUMN momentum_24h FLOAT",
+            "CREATE INDEX IF NOT EXISTS ix_positions_event_key ON positions (event_key)",
         ]:
             try:
                 conn.execute(text(stmt))
