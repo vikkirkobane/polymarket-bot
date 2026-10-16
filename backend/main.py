@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from backend.config import get_settings
-from backend.database import init_db, get_db, SessionLocal, Trade, MarketOpportunity, CopyTrader, CopySignal, JournalEntry, Position
+from backend.database import init_db, get_db, SessionLocal, Trade, MarketOpportunity, CopyTrader, CopySignal, JournalEntry, Position, StateKV
 from backend.polymarket.client import PolymarketClient
 from backend.polymarket.consensus import ConsensusEngine
 from backend.polymarket.copy_trader import CopyTradingEngine
@@ -44,6 +44,31 @@ _assistant: Optional["AssistantService"] = None
 _consensus_engine: Optional["ConsensusEngine"] = None
 
 bot_state: dict = {}
+
+
+def _set_durable_running(val: bool) -> None:
+    """Persist bot running state so a server restart/resume doesn't silently stop updates."""
+    db = SessionLocal()
+    try:
+        row = db.get(StateKV, "bot:running")
+        if row:
+            row.value = "true" if val else "false"
+        else:
+            db.add(StateKV(key="bot:running", value="true" if val else "false"))
+        db.commit()
+    except Exception as exc:
+        logger.error(f"Failed to persist bot running state: {exc}")
+    finally:
+        db.close()
+
+
+def _get_durable_running() -> bool:
+    db = SessionLocal()
+    try:
+        row = db.get(StateKV, "bot:running")
+        return bool(row and row.value == "true")
+    finally:
+        db.close()
 
 
 def quality_momentum_bonus(momentum_24h, side) -> float:
@@ -280,7 +305,7 @@ _bot_task: Optional[asyncio.Task] = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global settings, _poly_client, _analyst, _executor, _portfolio, _copy_engine, _researcher, _assistant, _consensus_engine, _risk, bot_state
+    global settings, _poly_client, _analyst, _executor, _portfolio, _copy_engine, _researcher, _assistant, _consensus_engine, _risk, _bot_task, bot_state
 
     settings = get_settings()
     _poly_client = PolymarketClient(
@@ -349,12 +374,19 @@ async def lifespan(app: FastAPI):
 
     init_db()
     _purge_old_opportunities()
+
+    # Resume the loop if it was running before the last shutdown/reload
+    if _get_durable_running():
+        bot_state["running"] = True
+        _bot_task = asyncio.create_task(bot_loop())
+        logger.info("Bot auto-resumed (was running before restart)")
+
     logger.info(f"Polymarket Bot started | mode={bot_state['mode']} | model={settings.ai_model}")
 
     # Auto-scan if DB has no recent data so pages are populated on first load
-    asyncio.create_task(_auto_scan_if_stale())
+    if not bot_state["running"]:
+        asyncio.create_task(_auto_scan_if_stale())
     yield
-    global _bot_task
     if _bot_task:
         _bot_task.cancel()
     await _poly_client.aclose()
@@ -414,6 +446,7 @@ async def start_bot():
     if bot_state["running"]:
         return {"status": "already_running"}
     bot_state["running"] = True
+    _set_durable_running(True)
     _bot_task = asyncio.create_task(bot_loop())
     await ws_manager.broadcast({"event": "bot_started", "mode": bot_state["mode"]})
     return {"status": "started"}
@@ -423,6 +456,7 @@ async def start_bot():
 async def stop_bot():
     global _bot_task
     bot_state["running"] = False
+    _set_durable_running(False)
     if _bot_task:
         _bot_task.cancel()
         _bot_task = None
@@ -942,15 +976,20 @@ async def manual_trade(req: ManualTradeRequest):
 
 @app.get("/api/pending-trades/dashboard")
 async def get_dashboard_pending_trades():
-    """Returns pending approvals flagged within the last 30 minutes.
-    Trades older than 30 minutes are auto-unflagged so the list stays current."""
+    """Returns pending approvals flagged within the last 3 hours.
+
+    Research flags auto-expire after 3h (edge goes stale). Copy signals stay
+    listed for 24h (matching the poller's dedupe window) while pending, then
+    auto-expire so the list can't flood with months-old backlog.
+    """
     from datetime import timedelta
     db = SessionLocal()
     try:
         now = datetime.utcnow()
-        cutoff = now - timedelta(minutes=30)
+        cutoff = now - timedelta(hours=3)
+        sig_cutoff = now - timedelta(hours=24)
 
-        # Auto-expire research opportunities older than 30 minutes
+        # Auto-expire research opportunities older than 3 hours
         expired = (
             db.query(MarketOpportunity)
             .filter(
@@ -963,7 +1002,23 @@ async def get_dashboard_pending_trades():
             e.flagged_for_approval = False
         if expired:
             db.commit()
-            logger.info(f"Auto-expired {len(expired)} pending approval(s) older than 30 minutes")
+            logger.info(f"Auto-expired {len(expired)} pending approval(s) older than 3 hours")
+
+        # Auto-expire stale pending copy signals (older than the 24h dedupe
+        # window — those markets have moved on; mirrors the research expiry).
+        stale_sigs = (
+            db.query(CopySignal)
+            .filter(
+                CopySignal.status == "pending",
+                CopySignal.timestamp < sig_cutoff,
+            )
+            .all()
+        )
+        for s in stale_sigs:
+            s.status = "expired"
+        if stale_sigs:
+            db.commit()
+            logger.info(f"Auto-expired {len(stale_sigs)} pending copy signal(s) older than 24 hours")
 
         # Markets already executed — exclude from research pending
         traded_markets = {
@@ -987,7 +1042,7 @@ async def get_dashboard_pending_trades():
             db.query(CopySignal)
             .filter(
                 CopySignal.status == "pending",
-                CopySignal.timestamp >= cutoff,
+                CopySignal.timestamp >= sig_cutoff,
             )
             .order_by(CopySignal.timestamp.desc())
             .all()
@@ -1165,6 +1220,34 @@ async def mark_signal_outcome(signal_id: int, req: OutcomeRequest):
         db.rollback()
         logger.error(f"Failed to save signal outcome {signal_id}: {exc}")
         raise HTTPException(500, "Failed to save outcome to database")
+    finally:
+        db.close()
+
+
+class SignalRatingRequest(BaseModel):
+    rating: Optional[int] = None  # 1–5, or None/0 to clear
+
+
+@app.post("/api/copy-signals/{signal_id}/rating")
+async def rate_signal(signal_id: int, req: SignalRatingRequest):
+    """Attach a user 1–5 star rating to a copy signal (null/0 clears it)."""
+    if req.rating is not None and not (1 <= req.rating <= 5):
+        raise HTTPException(400, "rating must be between 1 and 5 (or null to clear)")
+    db = SessionLocal()
+    try:
+        sig = db.query(CopySignal).filter(CopySignal.id == signal_id).first()
+        if not sig:
+            raise HTTPException(404, "Copy signal not found")
+        sig.rating = req.rating or None
+        db.commit()
+        logger.info(f"Signal rating {req.rating} saved — id={signal_id}, market: {sig.question[:50]}")
+        return {"ok": True, "id": signal_id, "rating": sig.rating}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        db.rollback()
+        logger.error(f"Failed to save signal rating {signal_id}: {exc}")
+        raise HTTPException(500, "Failed to save rating to database")
     finally:
         db.close()
 

@@ -561,13 +561,14 @@ async function followTrader(address) {
 
 async function loadSignals() {
   const signals = await get("/api/copy-signals");
+  window._copySignals = signals;
   const tbody = el("signals-body");
   if (!signals.length) {
     tbody.innerHTML = `<tr><td colspan="7" class="empty-row">No signals yet</td></tr>`;
     return;
   }
-  tbody.innerHTML = signals.map(s => `
-    <tr>
+  tbody.innerHTML = signals.map((s, idx) => `
+    <tr class="clickable-row" title="Click for full details" onclick="App.showSignalDetails(${idx})">
       <td>${esc(s.trader_name || "—")}</td>
       <td>${esc(s.question?.slice(0,40) || "—")}...</td>
       <td>${s.side}</td>
@@ -577,6 +578,81 @@ async function loadSignals() {
       <td>${s.timestamp ? new Date(s.timestamp).toLocaleString() : "—"}</td>
     </tr>
   `).join("");
+}
+
+function signalDetailRow(label, valueHtml) {
+  return `<div class="signal-detail-row"><span class="signal-detail-label">${label}</span><span class="signal-detail-value">${valueHtml}</span></div>`;
+}
+
+function showSignalDetails(idx) {
+  const s = (window._copySignals || [])[idx];
+  if (!s) return;
+
+  const statusClass = s.status === "pending" ? "pending" : s.status === "executed" ? "filled" : s.status === "skipped" ? "failed" : "low";
+  const timeStr = s.timestamp ? new Date(s.timestamp).toLocaleString() : "—";
+  const priceStr = s.price != null ? `$${Number(s.price).toFixed(3)} / share` : "—";
+  const origStr = s.original_size != null ? `$${fmtNum(s.original_size)}` : "—";
+  const copyStr = s.copied_size != null ? `$${fmtNum(s.copied_size)}` : "—";
+  const sharesStr = (s.copied_size != null && s.price > 0) ? `≈ ${fmtNum(s.copied_size / s.price)} shares` : "—";
+  const addr = s.trader_address || "—";
+  const addrShort = addr.length > 14 ? `${addr.slice(0, 8)}…${addr.slice(-6)}` : addr;
+  const mid = s.market_id || "—";
+  const midShort = mid.length > 20 ? `${mid.slice(0, 14)}…${mid.slice(-6)}` : mid;
+  const ratingVal = s.rating || 0;
+  const starsHtml = `<span class="star-rating">${[1, 2, 3, 4, 5].map(v =>
+    `<span class="star${v <= ratingVal ? " filled" : ""}" data-val="${v}" title="Rate ${v}/5 — click again to clear" onclick="App.rateSignal(${s.id}, ${v})">${v <= ratingVal ? "★" : "☆"}</span>`
+  ).join("")}</span>`;
+  // Same Win/Loss outcome marking as the dashboard pending-trade cards
+  const traderLabel = esc(s.trader_name || "Trader");
+  const outcomeHtml = s.outcome
+    ? `<div class="outcome-marked ${s.outcome}">${s.outcome === "success" ? "✓ Marked as Win" : "✗ Marked as Loss"}</div>`
+    : `<div class="outcome-feedback">
+         <span class="outcome-label">Rate ${traderLabel}'s call:</span>
+         <button class="btn-outcome btn-outcome-success" onclick="App.markSignalOutcome(${s.id}, 'success', this)">✓ Win</button>
+         <button class="btn-outcome btn-outcome-failure" onclick="App.markSignalOutcome(${s.id}, 'failure', this)">✗ Loss</button>
+       </div>`;
+
+  el("signal-details-question").innerHTML = esc(s.question || "Unknown market");
+  el("signal-details").innerHTML = [
+    signalDetailRow("Trader", `<strong>${esc(s.trader_name || "Unknown")}</strong>&nbsp;<span class="signal-detail-mono" title="${escAttr(addr)}">${esc(addrShort)}</span>`),
+    signalDetailRow("Side", `<span class="badge badge-${s.side === "NO" ? "no" : "yes"}">${esc(s.side || "—")}</span>`),
+    signalDetailRow("Signal price", esc(priceStr)),
+    signalDetailRow("Whale's position size", esc(origStr)),
+    signalDetailRow("Suggested copy size", esc(copyStr)),
+    signalDetailRow("Estimated shares", esc(sharesStr)),
+    signalDetailRow("Status", `<span class="badge badge-${statusClass}">${esc(s.status)}</span>`),
+    signalDetailRow("Detected at", esc(timeStr)),
+    signalDetailRow("Your rating", starsHtml),
+    signalDetailRow("Outcome", outcomeHtml),
+    signalDetailRow("Market (condition) ID", `<span class="signal-detail-mono" title="${escAttr(mid)}">${esc(midShort)}</span>`),
+    signalDetailRow("Signal ID", `#${s.id}`),
+  ].join("");
+
+  el("signal-modal-overlay").style.display = "flex";
+}
+
+async function rateSignal(signalId, val) {
+  const sig = (window._copySignals || []).find(x => x.id === signalId);
+  const newRating = (sig && sig.rating === val) ? null : val; // clicking the active star clears the rating
+  try {
+    const r = await post(`/api/copy-signals/${signalId}/rating`, { rating: newRating });
+    if (r && r.ok) {
+      if (sig) sig.rating = r.rating;
+      const wrap = document.querySelector("#signal-details .star-rating");
+      if (wrap) wrap.querySelectorAll(".star").forEach((st, i) => {
+        const filled = i < (r.rating || 0);
+        st.textContent = filled ? "★" : "☆";
+        st.classList.toggle("filled", filled);
+      });
+      addFeedItem(`Rated signal #${signalId}: ${r.rating ? r.rating + "/5 ★" : "rating cleared"}`, "signal", new Date().toLocaleTimeString());
+    }
+  } catch (e) {
+    alert("Failed to save rating: " + e.message);
+  }
+}
+
+function closeSignalDetails() {
+  el("signal-modal-overlay").style.display = "none";
 }
 
 // ── Pending Approvals ───────────────────────────────────────────────────────
@@ -1253,6 +1329,9 @@ async function markSignalOutcome(signalId, outcome, buttonEl) {
     const result = await post(`/api/copy-signals/${signalId}/outcome`, { outcome });
     if (result.status === "updated") {
       _applyOutcomeUI(buttonEl, outcome);
+      // Keep the copy-page modal cache in sync so the marked state survives reopening
+      const cached = (window._copySignals || []).find(x => x.id === signalId);
+      if (cached) cached.outcome = outcome;
       const trader = result.trader || "trader";
       addFeedItem(`Outcome: ${outcome} — ${trader}'s signal`, "signal", new Date().toLocaleTimeString());
     }
@@ -2629,6 +2708,7 @@ async function refreshConsensusCache() {
 const App = {
   startBot, stopBot, runScan, setMode, setModel,
   refreshTopTraders, loadLeaderboard, showAddTraderModal, closeModal, addTrader, removeTrader, followTrader,
+  loadSignals, showSignalDetails, closeSignalDetails, rateSignal,
   loadPendingApprovals, dismissApproval, approveTradeDirect,
   loadFutureTrades, approveFutureTrade,
   loadTrades, fundAccount, approveTrade, dismissTrade,

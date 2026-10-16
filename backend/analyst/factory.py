@@ -65,21 +65,47 @@ class OpenAIAnalyst(BaseAnalyst):
 class GeminiAnalyst(BaseAnalyst):
     model_name = "gemini"
 
-    def __init__(self, api_key: str, model: str = "gemini-3-flash"):
+    # Verified against the account's key (models.list) — flash tier rotates fast,
+    # so fall through when a generation is overloaded (503) or quota-capped (429).
+    _FALLBACK_MODELS = [
+        "gemini-3.8-flash",
+        "gemini-3.6-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-3.1-flash-lite",
+    ]
+
+    def __init__(self, api_key: str, model: str = "gemini-3.8-flash"):
         from google import genai
         self.client = genai.Client(api_key=api_key, http_options={'api_version': 'v1'})
         self.model_id = model
 
     async def _call_model(self, prompt: str) -> str:
-        # Wrap synchronous SDK call in a thread to avoid blocking the event loop
-        response = await asyncio.to_thread(
-            self.client.models.generate_content,
-            model=self.model_id,
-            contents=prompt,
-        )
-        if not (response and response.text):
-            raise RuntimeError(f"Gemini {self.model_id} returned empty content")
-        return response.text
+        # Deduplicate preferred model first
+        seen: set = set()
+        ordered = [m for m in [self.model_id] + self._FALLBACK_MODELS if not (m in seen or seen.add(m))]
+        last_err: Exception | None = None
+        for mid in ordered:
+            try:
+                # Wrap synchronous SDK call in a thread to avoid blocking the event loop
+                response = await asyncio.to_thread(
+                    self.client.models.generate_content,
+                    model=mid,
+                    contents=prompt,
+                )
+                if response and response.text:
+                    if mid != self.model_id:
+                        logger.info(f"Gemini: switched to {mid}")
+                        self.model_id = mid
+                    return response.text
+                last_err = RuntimeError(f"Gemini {mid} returned empty content")
+            except Exception as exc:
+                last_err = exc
+                err_str = str(exc)
+                if any(tag in err_str for tag in ("503", "429", "NOT_FOUND", "no longer available")):
+                    logger.warning(f"Gemini {mid} unavailable, trying next: {err_str[:80]}")
+                    continue
+                raise
+        raise last_err or RuntimeError("All Gemini fallback models exhausted")
 
 
 # ── Mock (for testing) ─────────────────────────────────────────────────────────
@@ -114,7 +140,7 @@ class MockAnalyst(BaseAnalyst):
 class OpenRouterAnalyst(BaseAnalyst):
     model_name = "openrouter"
 
-    def __init__(self, api_key: str, model: str = "tencent/hy3-preview:free"):
+    def __init__(self, api_key: str, model: str = "google/gemma-4-31b-it:free"):
         # OpenRouter is OpenAI-compatible
         self.client = openai_lib.AsyncOpenAI(
             api_key=api_key,
@@ -139,15 +165,14 @@ class OpenRouterAnalyst(BaseAnalyst):
 
     async def _call_model(self, prompt: str) -> str:
         # Ordered fallback list — tries each model in sequence if the previous is unavailable.
+        # All slugs verified live against openrouter.ai/api/v1/models (2026-10-15).
         fallbacks = [
             self.model,
-            "openai/gpt-oss-120b:free",
             "google/gemma-4-31b-it:free",
+            "nvidia/nemotron-3.5-lightning:free",
             "nvidia/nemotron-3-super-120b-a12b:free",
-            "inclusionai/ring-2.6-1t:free",
-            "z-ai/glm-4.5-air:free",
-            "openai/gpt-oss-20b:free",
-            "qwen/qwen3-next-80b-a3b-instruct:free",
+            "nvidia/nemotron-3-ultra-550b-a55b:free",
+            "poolside/laguna-s-2.1:free",
         ]
         # Deduplicate while preserving order
         seen: set = set()
@@ -169,6 +194,22 @@ class OpenRouterAnalyst(BaseAnalyst):
                             logger.info(f"OpenRouter: switched to {model_name}")
                             self.model = model_name
                         return content
+                    # Reasoning models can spend the whole completion budget on thinking
+                    # and return empty content — disable reasoning and retry once.
+                    if not getattr(self, "_no_reason_retry", False):
+                        self._no_reason_retry = True
+                        logger.info(f"OpenRouter {model_name}: empty content — retrying with reasoning disabled")
+                        response = await self.client.chat.completions.create(
+                            model=model_name,
+                            messages=[{"role": "user", "content": prompt}],
+                            extra_headers=self._extra_headers,
+                            max_tokens=self.max_tokens,
+                            extra_body={"reasoning": {"effort": "none"}},
+                        )
+                        content = response.choices[0].message.content if response.choices else None
+                        if content:
+                            self._no_reason_retry = False
+                            return content
                     logger.warning(f"OpenRouter {model_name} returned empty content, trying next")
                     break  # empty content isn't a budget problem — move to next model
                 except Exception as e:
@@ -189,6 +230,13 @@ class OpenRouterAnalyst(BaseAnalyst):
                     if any(code in err_str for code in ("404", "400", "503", "502", "529")):
                         logger.warning(f"OpenRouter {model_name} unavailable ({err_str[:60]}), trying next")
                         break  # model not found — don't retry same model
+                    if "free-models-per-day" in err_str:
+                        # Account-wide cap shared by ALL :free models — retrying others is futile
+                        logger.error(
+                            "OpenRouter daily free-tier quota exhausted. Wait for the daily reset "
+                            "or add ~$5 credits to your OpenRouter account to unlock paid models."
+                        )
+                        raise last_err
                     if "429" in err_str:
                         await asyncio.sleep(2)
                         continue  # rate-limited — one patient retry

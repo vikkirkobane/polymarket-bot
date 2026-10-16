@@ -18,12 +18,14 @@ For EACH market, decide:
 3. reasoning — one sentence (max 30 words).
 
 Rules:
-- Only include a market if your estimate differs meaningfully from the market price (>= {min_edge_pct}% absolute difference).
-- Include at most {max_opps} markets — your strongest calls only.
+- Return exactly one object for EVERY market listed above — never omit markets.
+  Edge filtering is done against live prices afterwards, so an estimate that
+  matches the current price is fine (it just means "no edge").
+- Confidence: only claim high confidence with concrete, verifiable knowledge.
 - Prefer markets ending within 60 days; far-future or longshot (<3% or >97%) markets rarely offer real edge.
 - Do not invent news. Never estimate 0.0 or 1.0 exactly.
 
-Respond with ONLY a valid JSON array, no markdown, no commentary. Example:
+Respond with ONLY a valid JSON array (one object per market), no markdown, no commentary. Example:
 [
   {{
     "market_id": "0xabc...",
@@ -32,8 +34,6 @@ Respond with ONLY a valid JSON array, no markdown, no commentary. Example:
     "reasoning": "Incumbent won all 6 prior primaries in this state."
   }}
 ]
-
-Return [] if nothing qualifies.
 """
 
 

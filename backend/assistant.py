@@ -297,18 +297,19 @@ _ANALYSIS_KEYWORDS = {
 }
 
 # Primary model for deep analysis, fallback sequence for availability
+# (slugs verified live on OpenRouter 2026-10-15)
 _ANALYSIS_MODELS = [
-    "nvidia/nemotron-3-super-120b-a12b:free",
-    "openai/gpt-oss-120b:free",
     "google/gemma-4-31b-it:free",
+    "nvidia/nemotron-3.5-lightning:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
     "openrouter/auto",
 ]
 
 # Fast model for simple Q&A, fallback sequence
 _FAST_MODELS = [
-    "nvidia/nemotron-3-super-120b-a12b:free",
-    "openai/gpt-oss-120b:free",
     "google/gemma-4-31b-it:free",
+    "nvidia/nemotron-3.5-lightning:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
     "openrouter/auto",
 ]
 

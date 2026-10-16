@@ -1305,3 +1305,30 @@ body { font-family: 'Inter', system-ui, sans-serif; background: var(--bg); color
 .future-horizon-section:nth-child(4) .future-horizon-header { border-left-color: #f59e0b; }
 .future-horizon-icon { font-size: 1rem; }
 .future-horizon-label { font-weight: 600; font-size: 0.88rem; color: var(--text); }
+
+/* ── Copy Signal Details ───────────────────────────────────────────────── */
+.clickable-row { cursor: pointer; }
+.clickable-row:hover td { background: rgba(99,102,241,0.08); }
+.signal-detail-question {
+  padding: 10px 14px; margin-bottom: 14px;
+  background: rgba(99,102,241,0.08); border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 0.95rem; font-weight: 600; color: var(--text); line-height: 1.45;
+}
+.signal-detail-grid { display: flex; flex-direction: column; }
+.signal-detail-row {
+  display: flex; justify-content: space-between; align-items: center; gap: 12px;
+  padding: 8px 2px; border-bottom: 1px solid rgba(99,179,237,0.06);
+}
+.signal-detail-row:last-child { border-bottom: none; }
+.signal-detail-label { color: var(--text-muted); font-size: 0.8rem; white-space: nowrap; }
+.signal-detail-value { color: var(--text); font-size: 0.85rem; text-align: right; word-break: break-word; }
+.signal-detail-mono {
+  font-family: monospace; font-size: 0.75rem; color: var(--text-muted);
+  background: rgba(100,116,139,0.12); padding: 2px 6px; border-radius: 4px;
+}
+/* Win/Loss outcome widget inside the signal details modal (reuses .outcome-feedback) */
+.signal-detail-row .outcome-feedback {
+  margin-top: 0; padding-top: 0; border-top: none;
+  justify-content: flex-end; width: 100%;
+}

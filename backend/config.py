@@ -16,11 +16,11 @@ class Settings(BaseSettings):
     openai_api_key: str = Field("", alias="OPENAI_API_KEY")
     google_api_key: str = Field("", alias="GOOGLE_API_KEY")
     openrouter_api_key: str = Field("", alias="OPENROUTER_API_KEY")
-    openrouter_model: str = Field("nvidia/nemotron-3-super-120b-a12b:free", alias="OPENROUTER_MODEL")
+    openrouter_model: str = Field("google/gemma-4-31b-it:free", alias="OPENROUTER_MODEL")
     # Concrete provider models (override only if a provider renames/deprecates defaults)
     anthropic_model: str = Field("claude-sonnet-4-5", alias="ANTHROPIC_MODEL")
     openai_model: str = Field("gpt-4o", alias="OPENAI_MODEL")
-    gemini_model: str = Field("gemini-3-flash", alias="GEMINI_MODEL")
+    gemini_model: str = Field("gemini-3.8-flash", alias="GEMINI_MODEL")
 
     # Polymarket credentials
     poly_api_key: str = Field("", alias="POLY_API_KEY")

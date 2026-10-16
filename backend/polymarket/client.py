@@ -375,7 +375,7 @@ class PolymarketClient:
         """
         params = {
             "limit": min(max(limit, 1), 50),
-            "offset": 0,
+            # NOTE: v2 leaderboard is cursor-only — passing 'offset' is a hard 400.
             "order_by": "PNL",
             "time_period": time_period.lower(),
         }

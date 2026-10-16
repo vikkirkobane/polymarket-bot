@@ -384,6 +384,8 @@ class CopyTradingEngine:
                     "copied_size": s.copied_size,
                     "price": s.price,
                     "status": s.status,
+                    "rating": s.rating,
+                    "outcome": s.outcome,
                     "timestamp": s.timestamp.isoformat() if s.timestamp else None,
                 }
                 for s in signals

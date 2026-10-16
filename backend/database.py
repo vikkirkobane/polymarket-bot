@@ -83,6 +83,7 @@ class CopySignal(Base):
     timestamp = Column(DateTime, default=datetime.utcnow)
     outcome = Column(String, nullable=True)           # 'success' | 'failure'
     outcome_marked_at = Column(DateTime, nullable=True)
+    rating = Column(Integer, nullable=True)           # user rating 1–5
 
 
 class MarketOpportunity(Base):
@@ -159,6 +160,7 @@ def init_db():
             "ALTER TABLE market_opportunities ADD COLUMN no_token_id VARCHAR",
             "ALTER TABLE copy_signals ADD COLUMN outcome VARCHAR",
             "ALTER TABLE copy_signals ADD COLUMN outcome_marked_at DATETIME",
+            "ALTER TABLE copy_signals ADD COLUMN rating INTEGER",
             "ALTER TABLE copy_traders ADD COLUMN last_position_poll DATETIME",
             "ALTER TABLE trader_position_states ADD COLUMN side VARCHAR",
             "ALTER TABLE trader_position_states ADD COLUMN last_event_ts INTEGER",
