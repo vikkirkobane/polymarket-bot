@@ -140,19 +140,38 @@ async def select_and_process_opportunities(opportunities: list[dict]):
     
     if settings.auto_execute:
         resolved_side = selected.get("recommended_side") or selected.get("side") or "YES"
+        resolved_price = selected.get("yes_price", 0.5) if resolved_side == "YES" else selected.get("no_price", 0.5)
+        # Announce the order before submitting it: live mode can take seconds to
+        # fill, and a trade being acted on should hit the dashboard immediately.
+        await ws_manager.broadcast({
+            "event": "trade_submitted",
+            "trade": {
+                "market_id": selected["market_id"],
+                "question": selected["question"],
+                "side": resolved_side,
+                "size": settings.max_bet_size,
+                "price": resolved_price,
+                "status": "submitting",
+                "source": "research",
+                "mode": bot_state.get("mode", "paper"),
+            },
+        })
         trade = await _executor.execute(
             market_id=selected["market_id"],
             question=selected["question"],
             side=resolved_side,
             size_usd=settings.max_bet_size,
-            price=selected.get("yes_price", 0.5) if resolved_side == "YES" else selected.get("no_price", 0.5),
+            price=resolved_price,
             source="research",
             model_used=settings.ai_model,
             token_id=(selected.get("yes_token_id") if resolved_side == "YES" else selected.get("no_token_id")) or "",
         )
         await ws_manager.broadcast({"event": "trade_executed", "trade": trade})
     else:
-        # Persist the flag in the DB so it survives page reloads
+        # Persist the flag in the DB so it survives page reloads. The dashboard
+        # reads pending approvals straight from the DB, so an alert fired without
+        # a committed row would notify a trade that never gets displayed.
+        opp_id = None
         db = SessionLocal()
         try:
             opp_record = (
@@ -164,18 +183,42 @@ async def select_and_process_opportunities(opportunities: list[dict]):
             if opp_record:
                 opp_record.flagged_for_approval = True
                 opp_record.scanned_at = datetime.utcnow()  # reset timer so 30-min window starts now
-                db.commit()
-                logger.info(f"Flagged opportunity for approval (id={opp_record.id}): {opp_record.question[:60]}")
+            else:
+                opp_record = MarketOpportunity(
+                    market_id=selected["market_id"],
+                    question=selected["question"],
+                    yes_price=selected.get("yes_price", 0.5),
+                    no_price=selected.get("no_price", 0.5),
+                    volume_24h=selected.get("volume_24h", 0.0) or 0.0,
+                    edge_pct=selected.get("edge_pct", 0.0) or 0.0,
+                    side=selected.get("recommended_side") or selected.get("side") or "YES",
+                    confidence=selected.get("confidence", "medium"),
+                    model_used=selected.get("model_used", settings.ai_model),
+                    analysis=selected.get("analysis") or selected.get("reasoning") or "",
+                    end_date=selected.get("end_date"),
+                    yes_token_id=selected.get("yes_token_id"),
+                    no_token_id=selected.get("no_token_id"),
+                    estimated_prob=selected.get("estimated_prob"),
+                    momentum_24h=selected.get("momentum_24h"),
+                    flagged_for_approval=True,
+                    scanned_at=datetime.utcnow(),
+                )
+                db.add(opp_record)
+            db.commit()
+            db.refresh(opp_record)
+            opp_id = opp_record.id
+            logger.info(f"Flagged opportunity for approval (id={opp_id}): {opp_record.question[:60]}")
         except Exception as exc:
             logger.error(f"Failed to flag opportunity for approval: {exc}")
         finally:
             db.close()
 
-        # Alert the user via WebSocket
+        # Alert the user via WebSocket — carries the DB id so the dashboard card
+        # rendered from this payload matches the one reloaded from the DB.
         alert_data = {
             "event": "trade_alert",
             "tier": tier,
-            "opportunity": selected,
+            "opportunity": {**selected, "id": opp_id},
             "message": f"ALERT: Potential {tier} trade found! Click Approve to execute."
         }
         await ws_manager.broadcast(alert_data)
@@ -218,6 +261,19 @@ async def run_copy_cycle():
             if bot_state["running"]:
                 for sig in signals:
                     if settings.auto_execute:
+                        await ws_manager.broadcast({
+                            "event": "trade_submitted",
+                            "trade": {
+                                "market_id": sig["market_id"],
+                                "question": sig["question"],
+                                "side": sig["side"],
+                                "size": sig["copied_size"],
+                                "price": sig["price"],
+                                "status": "submitting",
+                                "source": "copy",
+                                "mode": bot_state.get("mode", "paper"),
+                            },
+                        })
                         trade = await _executor.execute(
                             market_id=sig["market_id"],
                             question=sig["question"],
@@ -645,8 +701,9 @@ async def remove_copy_trader(trader_id: int):
 
 
 @app.get("/api/copy-signals")
-async def copy_signals(limit: int = 50):
-    return _copy_engine.get_recent_signals(limit=limit)
+async def copy_signals(limit: int = 100, status: str = "all"):
+    """Recent copy signals, newest first. `status` = all | pending | executed | skipped | expired."""
+    return _copy_engine.get_recent_signals(limit=limit, status=status)
 
 
 @app.get("/api/copy-traders/leaderboard")
@@ -1121,6 +1178,25 @@ async def dismiss_signal_pending(signal_id: int):
             db.commit()
             logger.info(f"Dismissed copy signal id={signal_id} (trader: {sig.trader_name})")
         return {"status": "dismissed"}
+    finally:
+        db.close()
+
+
+@app.post("/api/pending-trades/signal/{signal_id}/executed")
+async def mark_signal_executed(signal_id: int):
+    """Flip a copy signal to 'executed' once the user approves the mirrored trade.
+
+    Without this the approval path only had /dismiss, so executed copy trades
+    were recorded as 'skipped' and looked missing from Recent Copy Signals.
+    """
+    db = SessionLocal()
+    try:
+        sig = db.query(CopySignal).filter(CopySignal.id == signal_id).first()
+        if sig:
+            sig.status = "executed"
+            db.commit()
+            logger.info(f"Copy signal id={signal_id} marked executed (trader: {sig.trader_name})")
+        return {"status": "executed"}
     finally:
         db.close()
 

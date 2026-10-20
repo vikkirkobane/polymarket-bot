@@ -59,15 +59,21 @@ document.querySelectorAll(".nav-item").forEach(item => {
 // ── WebSocket ───────────────────────────────────────────────────────────────
 
 let _wsBackoff = 2000;
+let _wsEverConnected = false;
 
 function connectWS() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   ws = new WebSocket(`${proto}://${location.host}/ws`);
 
   ws.onopen = () => {
+    const reconnected = _wsEverConnected;
+    _wsEverConnected = true;
     _wsBackoff = 2000;
     setWsStatus("connected");
     if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
+    // Alerts missed while the socket was down never get re-sent — pull the
+    // authoritative state so those trades appear on the dashboard right away.
+    if (reconnected) loadDashboard();
   };
 
   ws.onmessage = e => {
@@ -99,10 +105,26 @@ function handleWsEvent(data) {
     case "connected":
       updateStatusUI(data.status);
       break;
-    case "trade_executed":
-      addFeedItem(`Trade: ${data.trade?.side} $${data.trade?.size?.toFixed(2)} — ${truncate(data.trade?.question, 50)}`, "trade", now);
-      loadDashboard();
+    case "trade_submitted":
+      addFeedItem(`Submitting: ${data.trade?.side} $${fmtNum(data.trade?.size)} — ${truncate(data.trade?.question, 50)}`, "trade", now);
+      showSubmittingTrade(data.trade);
       break;
+    case "trade_executed": {
+      const st = data.trade?.status;
+      const bad = st && st !== "filled" && st !== "pending";
+      addFeedItem(
+        bad
+          ? `Trade ${st}: ${data.trade?.side} $${fmtNum(data.trade?.size)} — ${truncate(data.trade?.question, 40)}${data.trade?.error ? " (" + data.trade.error + ")" : ""}`
+          : `Trade: ${data.trade?.side} $${fmtNum(data.trade?.size)} — ${truncate(data.trade?.question, 50)}`,
+        bad ? "error" : "trade", now);
+      clearSubmittingTrade(data.trade);
+      loadDashboard();
+      // Mirror the fill in the signals table in place (pending → executed)
+      if (data.trade?.source === "copy" && currentPage() === "copy") {
+        patchSignalStatusByMarket(data.trade.market_id, data.trade.side, "executed");
+      }
+      break;
+    }
     case "scan_complete": {
       scanInProgress = false;
       addFeedItem(`Scan complete — ${data.opportunities} opportunities found`, "scan", now);
@@ -114,6 +136,12 @@ function handleWsEvent(data) {
     }
     case "copy_signals":
       addFeedItem(`${data.count} copy signal(s) received`, "signal", now);
+      // Signals are persisted as pending approvals — show them immediately
+      (data.signals || []).forEach(s => showTradeOnDashboard({ tier: "Copy Trade", signal: s }));
+      loadDashboardPendingTrades();
+      // Patch the signals table from the payload instead of refetching, so rows
+      // already on screen never disappear
+      ingestLiveSignals(data.signals);
       break;
     case "bot_started":
       updateBotButtons(true);
@@ -140,13 +168,84 @@ function handleWsEvent(data) {
 
 let pendingTrades = [];
 
+// Alerted trades are flashed for a few seconds after they land
+const _pendingAlertKeys = new Set();
+
+function _pendingKey(t) {
+  const opp = (t && (t.opportunity || t.signal)) || {};
+  if (t?.signal?._signal_id) return `sig-${t.signal._signal_id}`;
+  if (t?.opportunity?.id) return `opp-${t.opportunity.id}`;
+  const side = String(opp.side || opp.recommended_side || "YES").toUpperCase();
+  return `mkt-${opp.market_id || opp.question || "unknown"}-${side}`;
+}
+
+function _flashPendingCard(key) {
+  _pendingAlertKeys.add(key);
+  setTimeout(() => { _pendingAlertKeys.delete(key); renderPendingTrades(); }, 6000);
+}
+
+/** Paint a notified trade on the dashboard straight from the WS payload. */
+function showTradeOnDashboard(entry) {
+  const opp = entry.opportunity || entry.signal;
+  if (!opp || !opp.question) return;
+  const key = _pendingKey(entry);
+  const i = pendingTrades.findIndex(t => _pendingKey(t) === key);
+  if (i >= 0) pendingTrades[i] = entry; else pendingTrades.unshift(entry);
+  const badge = el("pending-count");
+  if (badge) badge.textContent = pendingTrades.length;
+  _flashPendingCard(key);
+  renderPendingTrades();
+}
+
 function handleTradeAlert(data) {
-  // Show browser notification immediately for real-time feel
-  if (Notification.permission === "granted") {
-    new Notification("PolyBot Trade Alert", { body: data.message });
-  }
-  // Reload from DB so the list is always the authoritative persisted state
+  // 1. Display the trade instantly — no round-trip, no waiting on the refetch
+  showTradeOnDashboard({
+    tier: data.tier || (data.signal ? "Copy Trade" : "Research"),
+    ...(data.signal ? { signal: data.signal } : { opportunity: data.opportunity }),
+  });
+  // 2. Browser notification + in-app toast (toast works even if alerts are blocked)
+  notifyTrade(data);
+  // 3. Reconcile with the DB — the authoritative persisted state
   loadDashboardPendingTrades();
+  if (currentPage() === "approvals") loadPendingApprovals();
+  if (currentPage() === "copy" && data.signal) ingestLiveSignals([data.signal]);
+}
+
+function notifyTrade(data) {
+  const message = data.message || "New trade requires your approval";
+  if ("Notification" in window && Notification.permission === "granted") {
+    const key = _pendingKey(data.signal ? { signal: data.signal } : { opportunity: data.opportunity });
+    const n = new Notification("PolyBot Trade Alert", { body: message, tag: key });
+    n.onclick = () => {
+      window.focus();
+      navigate("dashboard");
+      showTradeOnDashboard({ tier: data.tier, ...(data.signal ? { signal: data.signal } : { opportunity: data.opportunity }) });
+      n.close();
+    };
+  }
+  showToast(message, "info");
+}
+
+function enableAlerts() {
+  if (!("Notification" in window)) {
+    showToast("This browser does not support desktop notifications", "error");
+    return;
+  }
+  if (Notification.permission === "granted") {
+    updateAlertButton();
+    showToast("Trade alerts are already enabled", "info");
+    return;
+  }
+  Notification.requestPermission().then(updateAlertButton).catch(() => updateAlertButton());
+}
+
+function updateAlertButton() {
+  const btn = el("btn-alerts");
+  if (!btn) return;
+  const granted = "Notification" in window && Notification.permission === "granted";
+  btn.textContent = granted ? "🔔 Alerts On" : "🔔 Enable Alerts";
+  btn.classList.toggle("btn-success", granted);
+  btn.classList.toggle("btn-outline", !granted);
 }
 
 async function loadDashboardPendingTrades() {
@@ -172,9 +271,11 @@ function renderPendingTrades() {
   }
   container.innerHTML = pendingTrades.map((t, i) => {
     const opp = t.opportunity || t.signal;
+    if (!opp) return "";
     const side = opp.side || opp.recommended_side || "YES";
     const isResearch = !!t.opportunity;
     const isCopy = !!t.signal;
+    const isNew = _pendingAlertKeys.has(_pendingKey(t));
 
     // Research: use market_id (DB id not available in WebSocket events)
     // Copy: use _signal_id from the signal record
@@ -199,7 +300,7 @@ function renderPendingTrades() {
     }
 
     return `
-      <div class="pending-trade-card">
+      <div class="pending-trade-card${isNew ? " pending-trade-card--new" : ""}">
         <div class="pending-meta">
           <span class="badge badge-research">${t.tier}</span>
           <span class="badge badge-${side.toLowerCase()}">${side}</span>
@@ -258,10 +359,13 @@ async function approveTrade(index) {
   });
 
   if (result.status === "filled" || result.status === "pending") {
-    // For copy signals, also mark as executed in DB so it leaves the pending list
+    // For copy signals, mark the signal executed in DB so it leaves the pending
+    // list AND shows as 'executed' in Recent Copy Signals (/dismiss would have
+    // recorded the approved trade as 'skipped').
     const sig = t.signal;
     if (sig?._signal_id) {
-      await post(`/api/pending-trades/signal/${sig._signal_id}/dismiss`, {});
+      await post(`/api/pending-trades/signal/${sig._signal_id}/executed`, {});
+      patchSignalStatus(sig._signal_id, "executed");
     }
     addFeedItem(`Approved ${side} $${size} — ${truncate(opp.question, 40)}`, "trade", new Date().toLocaleTimeString());
   } else {
@@ -270,6 +374,7 @@ async function approveTrade(index) {
 
   // Always refresh from DB — this is the authoritative source
   await loadDashboardPendingTrades();
+  loadSignals();
 }
 
 async function dismissTrade(index) {
@@ -284,12 +389,14 @@ async function dismissTrade(index) {
       await post(`/api/pending-trades/research/${opp.id}/dismiss`, {});
     } else if (sig?._signal_id) {
       await post(`/api/pending-trades/signal/${sig._signal_id}/dismiss`, {});
+      patchSignalStatus(sig._signal_id, "skipped");
     }
   } catch (err) {
     console.error("Failed to persist dismissal:", err);
   }
 
   await loadDashboardPendingTrades();
+  loadSignals();
 }
 
 // ── API Helpers ─────────────────────────────────────────────────────────────
@@ -559,25 +666,240 @@ async function followTrader(address) {
   }
 }
 
-async function loadSignals() {
-  const signals = await get("/api/copy-signals");
-  window._copySignals = signals;
+// ── Recent Copy Signals (keyed / flicker-free) ────────────────────────────────
+// Rebuilding tbody.innerHTML on every refresh blanked all previously loaded rows
+// until the next response arrived. Rows are now keyed by signal id and patched in
+// place: new signals animate in at the top, changed rows repaint, refreshes fetch
+// silently in the background and scroll position is preserved.
+
+const _SIGNAL_MAX_ROWS = 200;
+const _SIGNAL_FRESH_MS = 120000;
+let _signalsFilterLoaded = null;   // status filter the DOM currently reflects
+let _signalsFetchAt = null;        // epoch ms of last successful fetch
+window._copySignalById = window._copySignalById || new Map();
+
+function _signalStatusBadge(status) {
+  if (status === "pending") return "pending";
+  if (status === "executed") return "filled";
+  if (status === "expired") return "expired";
+  return "failed";
+}
+
+function _signalFresh(s) {
+  const d = utcDate(s.timestamp);
+  return !!d && Date.now() - d.getTime() < _SIGNAL_FRESH_MS;
+}
+
+function _signalCells(s) {
+  const d = utcDate(s.timestamp);
+  const freshTag = _signalFresh(s) ? ' <span class="signal-new-tag">new</span>' : "";
+  const timeTitle = d ? d.toLocaleString() : "—";
+  return [
+    `<td>${esc(s.trader_name || "—")}${freshTag}</td>`,
+    `<td>${esc(s.question?.slice(0, 40) || "—")}...</td>`,
+    `<td>${esc(s.side)}</td>`,
+    `<td>$${fmtNum(s.copied_size)}</td>`,
+    `<td>${s.price?.toFixed(2) || "—"}</td>`,
+    `<td><span class="badge badge-${_signalStatusBadge(s.status)}">${esc(s.status)}</span></td>`,
+    `<td title="${timeTitle}" style="font-size:0.75rem;color:var(--text-muted)">${timeAgo(s.timestamp)}</td>`,
+  ].join("");
+}
+
+function _signalFingerprint(s) {
+  return [s.status, s.copied_size, s.price, s.timestamp, s.trader_name, s.question].join("|");
+}
+
+function _signalRow(s) {
+  const tr = document.createElement("tr");
+  tr.dataset.sid = String(s.id);
+  tr.dataset.fp = _signalFingerprint(s);
+  tr.className = "clickable-row signal-row--enter" + (_signalFresh(s) ? " signal-row--fresh" : "");
+  tr.title = "Click for full details";
+  tr.innerHTML = _signalCells(s);
+  tr.addEventListener("click", () => showSignalDetailsById(s.id));
+  return tr;
+}
+
+function _sortedSignals() {
+  return [...window._copySignalById.values()].sort((a, b) => {
+    const ta = (utcDate(a.timestamp) || { getTime: () => 0 }).getTime();
+    const tb = (utcDate(b.timestamp) || { getTime: () => 0 }).getTime();
+    return tb - ta || b.id - a.id;
+  }).slice(0, _SIGNAL_MAX_ROWS);
+}
+
+function _visibleSignals() {
+  const filter = _signalsFilterLoaded || "all";
+  const all = _sortedSignals();
+  return filter === "all" ? all : all.filter(s => s.status === filter);
+}
+
+function setSignalsCount(override) {
+  const countEl = el("signals-count");
+  if (!countEl) return;
+  if (override) { countEl.textContent = override; return; }
+  const n = (window._copySignals || []).length;
+  const upd = _signalsFetchAt
+    ? "updated " + Math.max(0, Math.round((Date.now() - _signalsFetchAt) / 1000)) + "s ago"
+    : "not loaded";
+  const filter = _signalsFilterLoaded || "all";
+  countEl.textContent = `${n} shown · ${filter} · ${upd}`;
+}
+
+// ---- scroll anchoring -----------------------------------------------------
+// Remember the row closest to the top of the visible list and how far below
+// that edge it sits. Offsets are measured against the scroll container, so they
+// stay correct however many rows land above or drop out of the window.
+function _captureSignalAnchor(tbody, page) {
+  const rows = Array.from(tbody.querySelectorAll("tr[data-sid]"));
+  if (!rows.length || !page) return null;
+  const listTop = page.getBoundingClientRect().top;
+  const pick = rows.find(r => r.getBoundingClientRect().bottom > listTop) || rows[rows.length - 1];
+  return { sid: pick.dataset.sid, offset: pick.getBoundingClientRect().top - listTop };
+}
+
+// Put that row back where it was. If it is gone (aged out of the 200-row window,
+// or the filter changed) we leave the scroll position alone rather than guessing
+// at pixel deltas.
+function _restoreSignalAnchor(tbody, page, anchor) {
+  if (!anchor || !page) return;
+  const row = tbody.querySelector(`tr[data-sid="${anchor.sid}"]`);
+  if (!row) return;
+  const shift = (row.getBoundingClientRect().top - page.getBoundingClientRect().top) - anchor.offset;
+  if (Math.abs(shift) > 1) page.scrollTop += shift;
+}
+
+/** Patch the table so it matches `signals` (newest-first) without rebuilding it. */
+function renderSignalsDelta(signals) {
   const tbody = el("signals-body");
-  if (!signals.length) {
-    tbody.innerHTML = `<tr><td colspan="7" class="empty-row">No signals yet</td></tr>`;
+  if (!tbody) return;
+
+  const want = new Set(signals.map(s => String(s.id)));
+  tbody.querySelectorAll("tr[data-sid]").forEach(r => { if (!want.has(r.dataset.sid)) r.remove(); });
+  if (signals.length) tbody.querySelectorAll("tr:not([data-sid])").forEach(r => r.remove());
+
+  const page = el("page-copy");
+  const anchor = _captureSignalAnchor(tbody, page);
+  let placed = null;
+
+  signals.forEach(s => {
+    let row = tbody.querySelector(`tr[data-sid="${s.id}"]`);
+    if (row) {
+      const fp = _signalFingerprint(s);
+      // repaint only rows whose data actually changed
+      if (row.dataset.fp !== fp) {
+        row.dataset.fp = fp;
+        row.innerHTML = _signalCells(s);
+        row.classList.toggle("signal-row--fresh", _signalFresh(s));
+      }
+    } else {
+      row = _signalRow(s);
+      if (placed) placed.after(row); else tbody.prepend(row);
+    }
+    placed = row;
+  });
+
+  _restoreSignalAnchor(tbody, page, anchor);
+}
+
+/** Keep relative times honest between fetches without touching the network. */
+function refreshSignalRowTimes() {
+  const tbody = el("signals-body");
+  if (!tbody) return;
+  tbody.querySelectorAll("tr[data-sid]").forEach(r => {
+    const s = window._copySignalById.get(Number(r.dataset.sid));
+    if (!s) return;
+    const cell = r.lastElementChild;
+    const d = utcDate(s.timestamp);
+    if (cell) {
+      cell.textContent = timeAgo(s.timestamp);
+      if (d) cell.title = d.toLocaleString();
+    }
+    const fresh = _signalFresh(s);
+    r.classList.toggle("signal-row--fresh", fresh);
+    if (!fresh) r.querySelector(".signal-new-tag")?.remove();
+  });
+  setSignalsCount();
+}
+
+function mergeSignalsIntoDataset(list) {
+  (list || []).forEach(s => {
+    if (!s || s.id == null) return;
+    window._copySignalById.set(s.id, { ...(window._copySignalById.get(s.id) || {}), ...s });
+  });
+  window._copySignals = _sortedSignals();
+}
+
+/** WebSocket signals appear instantly — no refetch, no lost rows. */
+function ingestLiveSignals(incoming) {
+  const list = (incoming || [])
+    .map(s => ({ ...s, id: s.id ?? s._signal_id, status: s.status || "pending" }))
+    .filter(s => s.id != null);
+  if (!list.length) return;
+  mergeSignalsIntoDataset(list);
+  if (currentPage() !== "copy" || !_signalsFilterLoaded) return;
+  const visible = _visibleSignals();
+  window._copySignals = visible;
+  renderSignalsDelta(visible);
+  setSignalsCount();
+}
+
+function patchSignalStatus(id, status) {
+  const s = window._copySignalById.get(Number(id));
+  if (!s) return;
+  s.status = status;
+  if (_signalsFilterLoaded) renderSignalsDelta(_visibleSignals());
+}
+
+function patchSignalStatusByMarket(marketId, side, status) {
+  window._copySignalById.forEach(s => {
+    const sameMarket = s.market_id === marketId;
+    const sameSide = String(s.side || "").toUpperCase() === String(side || "").toUpperCase();
+    if (sameMarket && sameSide) patchSignalStatus(s.id, status);
+  });
+}
+
+async function loadSignals() {
+  const tbody = el("signals-body");
+  if (!tbody) return;
+  const filter = el("signals-status-filter")?.value || "all";
+  const limit = _SIGNAL_MAX_ROWS;
+  const firstPaint = _signalsFilterLoaded !== filter || !tbody.querySelector("tr[data-sid]");
+
+  // Only the very first paint (or a filter switch) shows a placeholder; background
+  // refreshes leave the already-loaded rows untouched.
+  if (firstPaint) {
+    _signalsFilterLoaded = filter;
+    tbody.innerHTML = `<tr id="loading-signals"><td colspan="7" class="empty-row">Loading signals...</td></tr>`;
+  }
+
+  let signals;
+  try {
+    // `_` defeats any cached copy — the dashboard must always show live rows
+    signals = await get(`/api/copy-signals?limit=${limit}&status=${encodeURIComponent(filter)}&_=${Date.now()}`);
+  } catch (err) {
+    console.error("Failed to load copy signals:", err);
+    if (firstPaint) {
+      tbody.innerHTML = `<tr><td colspan="7" class="empty-row">Failed to load signals: ${esc(err.message)}</td></tr>`;
+    } else {
+      setSignalsCount("refresh failed — keeping last rows");
+    }
     return;
   }
-  tbody.innerHTML = signals.map((s, idx) => `
-    <tr class="clickable-row" title="Click for full details" onclick="App.showSignalDetails(${idx})">
-      <td>${esc(s.trader_name || "—")}</td>
-      <td>${esc(s.question?.slice(0,40) || "—")}...</td>
-      <td>${s.side}</td>
-      <td>$${s.copied_size}</td>
-      <td>${s.price?.toFixed(2) || "—"}</td>
-      <td><span class="badge badge-${s.status === "pending" ? "warn" : s.status === "executed" ? "filled" : "failed"}">${s.status}</span></td>
-      <td>${s.timestamp ? new Date(s.timestamp).toLocaleString() : "—"}</td>
-    </tr>
-  `).join("");
+
+  _signalsFetchAt = Date.now();
+  window._copySignalById = new Map((signals || []).filter(s => s && s.id != null).map(s => [s.id, s]));
+  window._copySignals = signals || [];
+
+  if (!window._copySignals.length) {
+    const label = filter === "all" ? "" : filter + " ";
+    tbody.innerHTML = `<tr><td colspan="7" class="empty-row">No ${label}signals yet</td></tr>`;
+    setSignalsCount("0 signals");
+    return;
+  }
+
+  renderSignalsDelta(window._copySignals);
+  setSignalsCount();
 }
 
 function signalDetailRow(label, valueHtml) {
@@ -586,10 +908,21 @@ function signalDetailRow(label, valueHtml) {
 
 function showSignalDetails(idx) {
   const s = (window._copySignals || [])[idx];
+  if (s) showSignalDetailsById(s.id);
+}
+
+// Rows are keyed by id (indexes shift as new signals are prepended), so the modal
+// looks the record up in the live dataset instead of a snapshot array position.
+function showSignalDetailsById(id) {
+  const s = window._copySignalById.get(Number(id))
+    || (window._copySignals || []).find(x => x.id === Number(id));
   if (!s) return;
 
-  const statusClass = s.status === "pending" ? "pending" : s.status === "executed" ? "filled" : s.status === "skipped" ? "failed" : "low";
-  const timeStr = s.timestamp ? new Date(s.timestamp).toLocaleString() : "—";
+  const statusClass = s.status === "pending" ? "pending" : s.status === "executed" ? "filled" : s.status === "skipped" ? "failed" : s.status === "expired" ? "expired" : "low";
+  const detected = utcDate(s.timestamp);
+  const timeStr = detected
+    ? `${detected.toLocaleString()} · ${timeAgo(s.timestamp)}`
+    : "—";
   const priceStr = s.price != null ? `$${Number(s.price).toFixed(3)} / share` : "—";
   const origStr = s.original_size != null ? `$${fmtNum(s.original_size)}` : "—";
   const copyStr = s.copied_size != null ? `$${fmtNum(s.copied_size)}` : "—";
@@ -632,7 +965,8 @@ function showSignalDetails(idx) {
 }
 
 async function rateSignal(signalId, val) {
-  const sig = (window._copySignals || []).find(x => x.id === signalId);
+  const sig = window._copySignalById.get(Number(signalId))
+    || (window._copySignals || []).find(x => x.id === signalId);
   const newRating = (sig && sig.rating === val) ? null : val; // clicking the active star clears the rating
   try {
     const r = await post(`/api/copy-signals/${signalId}/rating`, { rating: newRating });
@@ -1140,22 +1474,58 @@ function renderTradesTable(tbodyId, trades, cols = 7) {
   const tbody = el(tbodyId);
   if (!trades?.length) {
     tbody.innerHTML = `<tr><td colspan="${cols}" class="empty-row">No trades yet</td></tr>`;
-    return;
+  } else {
+    tbody.innerHTML = trades.map(t => {
+      const pnl = t.pnl || 0;
+      const pnlClass = pnl > 0 ? "pnl-pos" : pnl < 0 ? "pnl-neg" : "pnl-zero";
+      return `
+        <tr>
+          <td style="max-width:220px">${truncate(t.question, 55)}</td>
+          <td><span class="badge badge-${t.side?.toLowerCase()}">${t.side}</span></td>
+          <td>$${fmtNum(t.size)}</td>
+          <td style="font-family:'JetBrains Mono',monospace">${(t.price*100).toFixed(1)}¢</td>
+          <td><span class="badge badge-${t.source}">${t.source}</span></td>
+          <td><span class="badge badge-${t.status}">${t.status}</span></td>
+          <td style="font-size:0.75rem;color:var(--text-muted)">${timeAgo(t.timestamp)}</td>
+        </tr>`;
+    }).join("");
   }
-  tbody.innerHTML = trades.map(t => {
-    const pnl = t.pnl || 0;
-    const pnlClass = pnl > 0 ? "pnl-pos" : pnl < 0 ? "pnl-neg" : "pnl-zero";
-    return `
-      <tr>
-        <td style="max-width:220px">${truncate(t.question, 55)}</td>
-        <td><span class="badge badge-${t.side?.toLowerCase()}">${t.side}</span></td>
-        <td>$${fmtNum(t.size)}</td>
-        <td style="font-family:'JetBrains Mono',monospace">${(t.price*100).toFixed(1)}¢</td>
-        <td><span class="badge badge-${t.source}">${t.source}</span></td>
-        <td><span class="badge badge-${t.status}">${t.status}</span></td>
-        <td style="font-size:0.75rem;color:var(--text-muted)">${timeAgo(t.timestamp)}</td>
-      </tr>`;
-  }).join("");
+  // The tbody was just rebuilt — re-attach any in-flight orders on top of it
+  if (tbodyId === "recent-trades-body") paintSubmittingTrades();
+}
+
+// ── In-flight (submitted but not yet filled) trades ─────────────────────────
+
+const _submittingTrades = [];
+
+function showSubmittingTrade(t) {
+  if (!t || !t.question) return;
+  const i = _submittingTrades.findIndex(x => x.market_id === t.market_id && x.side === t.side);
+  if (i >= 0) _submittingTrades[i] = t; else _submittingTrades.unshift(t);
+  paintSubmittingTrades();
+}
+
+function clearSubmittingTrade(t) {
+  const i = _submittingTrades.findIndex(x => x.market_id === (t && t.market_id) && x.side === (t && t.side));
+  if (i >= 0) { _submittingTrades.splice(i, 1); paintSubmittingTrades(); }
+}
+
+function paintSubmittingTrades() {
+  const tbody = el("recent-trades-body");
+  if (!tbody) return;
+  tbody.querySelectorAll("tr.trade-row--submitting").forEach(r => r.remove());
+  if (!_submittingTrades.length) return;
+  if (tbody.querySelector(".empty-row")) tbody.innerHTML = "";
+  tbody.insertAdjacentHTML("afterbegin", _submittingTrades.map(t => `
+    <tr class="trade-row--submitting">
+      <td style="max-width:220px">${truncate(t.question, 55)}</td>
+      <td><span class="badge badge-${(t.side || "").toLowerCase()}">${esc(t.side)}</span></td>
+      <td>$${fmtNum(t.size)}</td>
+      <td style="font-family:'JetBrains Mono',monospace">${((t.price || 0) * 100).toFixed(1)}¢</td>
+      <td><span class="badge badge-${t.source || "manual"}">${esc(t.source || "manual")}</span></td>
+      <td><span class="badge badge-pending">submitting…</span></td>
+      <td style="font-size:0.75rem;color:var(--text-muted)">now</td>
+    </tr>`).join(""));
 }
 
 // ── Bot Controls ─────────────────────────────────────────────────────────────
@@ -1330,7 +1700,8 @@ async function markSignalOutcome(signalId, outcome, buttonEl) {
     if (result.status === "updated") {
       _applyOutcomeUI(buttonEl, outcome);
       // Keep the copy-page modal cache in sync so the marked state survives reopening
-      const cached = (window._copySignals || []).find(x => x.id === signalId);
+      const cached = window._copySignalById.get(Number(signalId))
+        || (window._copySignals || []).find(x => x.id === signalId);
       if (cached) cached.outcome = outcome;
       const trader = result.trader || "trader";
       addFeedItem(`Outcome: ${outcome} — ${trader}'s signal`, "signal", new Date().toLocaleTimeString());
@@ -1501,13 +1872,26 @@ function esc(str) { return (str || "").replace(/&/g,"&amp;").replace(/</g,"&lt;"
 function escAttr(str) { return (str || "").replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/'/g,"&#39;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
 function truncate(str, n) { return str && str.length > n ? esc(str.slice(0, n)) + "..." : esc(str || ""); }
 function fmtNum(n) { return Number(n || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+// Backend timestamps are naive UTC (datetime.utcnow). Parsing them as-is makes JS
+// apply the viewer's offset, so a signal created seconds ago can render as hours
+// old (or in the future) — append Z when no offset is present.
+function utcDate(iso) {
+  if (!iso) return null;
+  const s = String(iso).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return new Date(s + "T00:00:00Z");  // date-only
+  const hasTz = /(z|[+-]\d{2}:?\d{2})$/i.test(s);
+  const d = new Date(hasTz ? s : s.replace(" ", "T") + "Z");
+  return isNaN(d) ? null : d;
+}
 function timeAgo(iso) {
-  if (!iso) return "—";
-  const diff = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+  const d = utcDate(iso);
+  if (!d) return "—";
+  const diff = Math.floor((Date.now() - d.getTime()) / 1000);
+  if (diff < 0) return "just now";
   if (diff < 60) return `${diff}s ago`;
   if (diff < 3600) return `${Math.floor(diff/60)}m ago`;
   if (diff < 86400) return `${Math.floor(diff/3600)}h ago`;
-  return new Date(iso).toLocaleDateString();
+  return d.toLocaleDateString();
 }
 function currentPage() {
   const active = document.querySelector(".page.active");
@@ -2708,7 +3092,7 @@ async function refreshConsensusCache() {
 const App = {
   startBot, stopBot, runScan, setMode, setModel,
   refreshTopTraders, loadLeaderboard, showAddTraderModal, closeModal, addTrader, removeTrader, followTrader,
-  loadSignals, showSignalDetails, closeSignalDetails, rateSignal,
+  loadSignals, showSignalDetails, showSignalDetailsById, closeSignalDetails, rateSignal,
   loadPendingApprovals, dismissApproval, approveTradeDirect,
   loadFutureTrades, approveFutureTrade,
   loadTrades, fundAccount, approveTrade, dismissTrade,
@@ -2716,7 +3100,7 @@ const App = {
   loadCleanupStats, runCleanup,
   loadProfile, copyWallet,
   markOutcome, markOutcomeByMarket, markSignalOutcome, loadRankings,
-  loadDashboardPendingTrades,
+  loadDashboardPendingTrades, showTradeOnDashboard, enableAlerts,
   openJournalModal, openJournalFromCard, closeJournalModal, saveJournal,
   editJournalEntry, deleteJournalEntry, filterJournal,
   _setJournalSide, _setJournalRating,
@@ -2728,10 +3112,24 @@ const App = {
 document.addEventListener("DOMContentLoaded", () => {
   connectWS();
   navigate("dashboard");
+  updateAlertButton();
+  // Browsers only grant notification permission from a user gesture — ask on the
+  // first click/keypress so trade alerts actually reach the user.
+  const askAlerts = () => {
+    if ("Notification" in window && Notification.permission === "default") {
+      Notification.requestPermission().then(updateAlertButton).catch(() => {});
+    }
+  };
+  document.addEventListener("click", askAlerts, { once: true });
+  document.addEventListener("keydown", askAlerts, { once: true });
 
   // Auto-refresh every 30s
   setInterval(() => {
     const page = currentPage();
+    // Keep the dashboard pending list hot from any page — a trade that was
+    // notified while we were elsewhere shows up without a manual refresh.
+    // (loadDashboard already refreshes it when the dashboard is active.)
+    if (page !== "dashboard") loadDashboardPendingTrades();
     if (page === "dashboard") loadDashboard();
     else if (page === "copy") { loadLeaderboard(); loadCopyTraders(); loadSignals(); }
     else if (page === "opportunities") loadOpportunities();
@@ -2743,4 +3141,10 @@ document.addEventListener("DOMContentLoaded", () => {
     else if (page === "consensus") loadConsensus(true);
     else if (page === "journal") loadJournalPage();
   }, 30000);
+
+  // Cheap local tick: keep the signals table's relative times and "new" tags
+  // accurate without refetching (which used to blank the rows).
+  setInterval(() => {
+    if (currentPage() === "copy") refreshSignalRowTimes();
+  }, 10000);
 });

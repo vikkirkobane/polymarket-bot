@@ -363,12 +363,20 @@ class CopyTradingEngine:
         finally:
             db.close()
 
-    def get_recent_signals(self, limit: int = 50) -> list[dict]:
+    def get_recent_signals(self, limit: int = 50, status: Optional[str] = None) -> list[dict]:
+        """Newest signals first. `status` filters by exact value; 'all'/None = no filter.
+
+        Ordering is (timestamp, id) desc so that signals saved within the same
+        poll — whose timestamps can tie — never shuffle or hide the newest row.
+        """
         db = SessionLocal()
         try:
+            query = db.query(CopySignal)
+            if status and status != "all":
+                query = query.filter(CopySignal.status == status)
             signals = (
-                db.query(CopySignal)
-                .order_by(CopySignal.timestamp.desc())
+                query
+                .order_by(CopySignal.timestamp.desc(), CopySignal.id.desc())
                 .limit(limit)
                 .all()
             )

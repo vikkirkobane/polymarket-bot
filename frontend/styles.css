@@ -104,6 +104,13 @@ body { font-family: 'Inter', system-ui, sans-serif; background: var(--bg); color
 .data-table tbody tr:hover { background: rgba(99,102,241,0.04); }
 .data-table tbody tr:last-child td { border-bottom: none; }
 .empty-row { text-align: center; color: var(--text-muted); padding: 24px !important; }
+/* Signals detected in the last 2 minutes */
+.signal-row--fresh td { background: rgba(99,102,241,0.08); }
+/* Newly inserted rows animate in; existing rows are never re-rendered */
+.signal-row--enter { animation: signalEnter 0.45s ease; }
+@keyframes signalEnter { from { opacity: 0; transform: translateY(-6px); background: rgba(99,102,241,0.18); } to { opacity: 1; transform: translateY(0); } }
+.signal-new-tag { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 10px; font-size: 0.6rem; font-weight: 700; letter-spacing: 0.4px; background: rgba(99,102,241,0.18); color: var(--primary); vertical-align: middle; }
+.card-header .select { padding: 5px 8px; font-size: 0.75rem; }
 
 /* ── Badges ──────────────────────────────────────────────────────────────── */
 .badge { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: 0.7rem; font-weight: 600; letter-spacing: 0.3px; }
@@ -120,6 +127,8 @@ body { font-family: 'Inter', system-ui, sans-serif; background: var(--bg); color
 .badge-filled { background: rgba(16,185,129,0.15); color: var(--green); }
 .badge-failed { background: rgba(244,63,94,0.15); color: var(--red); }
 .badge-pending { background: rgba(245,158,11,0.15); color: var(--yellow); }
+.badge-rejected { background: rgba(244,63,94,0.15); color: var(--red); }
+.badge-expired { background: rgba(100,116,139,0.15); color: var(--text-sub); }
 .pnl-pos { color: var(--green); font-family: 'JetBrains Mono', monospace; }
 .pnl-neg { color: var(--red); font-family: 'JetBrains Mono', monospace; }
 .pnl-zero { color: var(--text-muted); font-family: 'JetBrains Mono', monospace; }
@@ -241,8 +250,13 @@ body { font-family: 'Inter', system-ui, sans-serif; background: var(--bg); color
 
 /* ── Pending Trade Cards ────────────────────────────────────────────────── */
 .pending-trade-card { background: rgba(99,102,241,0.05); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; margin-bottom: 8px; animation: slideIn 0.3s ease; }
+/* Freshly notified trade — draws the eye until the DB refresh settles it in */
+.pending-trade-card--new { border-color: var(--primary); background: rgba(99,102,241,0.12); animation: slideIn 0.3s ease, alertGlow 1.2s ease-in-out 4; }
+@keyframes alertGlow { 0%, 100% { box-shadow: 0 0 0 rgba(99,102,241,0); } 50% { box-shadow: 0 0 14px rgba(99,102,241,0.55); } }
 .pending-meta { display: flex; justify-content: space-between; margin-bottom: 8px; }
 .pending-question { font-size: 0.8rem; margin-bottom: 10px; line-height: 1.4; color: var(--text); }
+/* In-flight order row (submitted, awaiting fill) */
+.trade-row--submitting { animation: pulse 1.4s ease-in-out infinite; }
 .pending-actions { display: flex; gap: 8px; }
 
 /* ── Pending Approvals Page ─────────────────────────────────────────────── */
